@@ -10,7 +10,6 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/cpu.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/delay.h>
@@ -26,7 +25,6 @@
 #include <linux/module.h>
 #include <linux/nvram.h>
 #include <linux/initrd.h>
-#include <linux/random.h>
 
 #include <asm/bootinfo.h>
 #include <asm/byteorder.h>
@@ -107,10 +105,13 @@ EXPORT_SYMBOL(isa_sex);
 
 #define MASK_256K 0xfffc0000
 
+extern void paging_init(void);
+
 static void __init m68k_parse_bootinfo(const struct bi_record *record)
 {
-	const struct bi_record *first_record = record;
 	uint16_t tag;
+
+	save_bootinfo(record);
 
 	while ((tag = be16_to_cpu(record->tag)) != BI_LAST) {
 		int unknown = 0;
@@ -147,19 +148,9 @@ static void __init m68k_parse_bootinfo(const struct bi_record *record)
 			break;
 
 		case BI_COMMAND_LINE:
-			strscpy(m68k_command_line, data);
+			strlcpy(m68k_command_line, data,
+				sizeof(m68k_command_line));
 			break;
-
-		case BI_RNG_SEED: {
-			u16 len = be16_to_cpup(data);
-			add_bootloader_randomness(data + 2, len);
-			/*
-			 * Zero the data to preserve forward secrecy, and zero the
-			 * length to prevent kexec from using it.
-			 */
-			memzero_explicit((void *)data, len + 2);
-			break;
-		}
 
 		default:
 			if (MACH_IS_AMIGA)
@@ -190,8 +181,6 @@ static void __init m68k_parse_bootinfo(const struct bi_record *record)
 				tag);
 		record = (struct bi_record *)((unsigned long)record + size);
 	}
-
-	save_bootinfo(first_record);
 
 	m68k_realnum_memory = m68k_num_memory;
 #ifdef CONFIG_SINGLE_MEMORY_CHUNK
@@ -242,16 +231,13 @@ void __init setup_arch(char **cmdline_p)
 	setup_initial_init_mm((void *)PAGE_OFFSET, _etext, _edata, _end);
 
 #if defined(CONFIG_BOOTPARAM)
-	strscpy(m68k_command_line, CONFIG_BOOTPARAM_STRING, CL_SIZE);
+	strncpy(m68k_command_line, CONFIG_BOOTPARAM_STRING, CL_SIZE);
+	m68k_command_line[CL_SIZE - 1] = 0;
 #endif /* CONFIG_BOOTPARAM */
 	process_uboot_commandline(&m68k_command_line[0], CL_SIZE);
 	*cmdline_p = m68k_command_line;
 	memcpy(boot_command_line, *cmdline_p, CL_SIZE);
-	/*
-	 * Initialise the static keys early as they may be enabled by the
-	 * cpufeature code and early parameters.
-	 */
-	jump_label_init();
+
 	parse_early_param();
 
 	switch (m68k_machtype) {
@@ -327,16 +313,16 @@ void __init setup_arch(char **cmdline_p)
 		panic("No configuration setup");
 	}
 
-	if (IS_ENABLED(CONFIG_BLK_DEV_INITRD) && m68k_ramdisk.size)
+#ifdef CONFIG_BLK_DEV_INITRD
+	if (m68k_ramdisk.size) {
 		memblock_reserve(m68k_ramdisk.addr, m68k_ramdisk.size);
-
-	paging_init();
-
-	if (IS_ENABLED(CONFIG_BLK_DEV_INITRD) && m68k_ramdisk.size) {
 		initrd_start = (unsigned long)phys_to_virt(m68k_ramdisk.addr);
 		initrd_end = initrd_start + m68k_ramdisk.size;
 		pr_info("initrd: %08lx - %08lx\n", initrd_start, initrd_end);
 	}
+#endif
+
+	paging_init();
 
 #ifdef CONFIG_NATFEAT
 	nf_init();
@@ -505,7 +491,7 @@ static int __init proc_hardware_init(void)
 module_init(proc_hardware_init);
 #endif
 
-void __init arch_cpu_finalize_init(void)
+void check_bugs(void)
 {
 #if defined(CONFIG_FPU) && !defined(CONFIG_M68KFPU_EMU)
 	if (m68k_fputype == 0) {

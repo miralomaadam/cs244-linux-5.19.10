@@ -21,7 +21,7 @@
 #include <linux/iio/triggered_buffer.h>
 #include <linux/iio/sysfs.h>
 
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 
 /* Commands */
 #define ADS124S08_CMD_NOP	0x00
@@ -183,9 +183,9 @@ static int ads124s_reset(struct iio_dev *indio_dev)
 	struct ads124s_private *priv = iio_priv(indio_dev);
 
 	if (priv->reset_gpio) {
-		gpiod_set_value_cansleep(priv->reset_gpio, 0);
-		fsleep(200);
-		gpiod_set_value_cansleep(priv->reset_gpio, 1);
+		gpiod_set_value(priv->reset_gpio, 0);
+		udelay(200);
+		gpiod_set_value(priv->reset_gpio, 1);
 	} else {
 		return ads124s_write_cmd(indio_dev, ADS124S08_CMD_RESET);
 	}
@@ -193,7 +193,7 @@ static int ads124s_reset(struct iio_dev *indio_dev)
 	return 0;
 };
 
-static int ads124s_read(struct iio_dev *indio_dev)
+static int ads124s_read(struct iio_dev *indio_dev, unsigned int chan)
 {
 	struct ads124s_private *priv = iio_priv(indio_dev);
 	int ret;
@@ -242,7 +242,7 @@ static int ads124s_read_raw(struct iio_dev *indio_dev,
 			goto out;
 		}
 
-		ret = ads124s_read(indio_dev);
+		ret = ads124s_read(indio_dev, chan->channel);
 		if (ret < 0) {
 			dev_err(&priv->spi->dev, "Read ADC failed\n");
 			goto out;
@@ -279,7 +279,8 @@ static irqreturn_t ads124s_trigger_handler(int irq, void *p)
 	int scan_index, j = 0;
 	int ret;
 
-	iio_for_each_active_channel(indio_dev, scan_index) {
+	for_each_set_bit(scan_index, indio_dev->active_scan_mask,
+			 indio_dev->masklength) {
 		ret = ads124s_write_reg(indio_dev, ADS124S08_INPUT_MUX,
 					scan_index);
 		if (ret)
@@ -289,7 +290,7 @@ static irqreturn_t ads124s_trigger_handler(int irq, void *p)
 		if (ret)
 			dev_err(&priv->spi->dev, "Start ADC conversions failed\n");
 
-		priv->buffer[j] = ads124s_read(indio_dev);
+		priv->buffer[j] = ads124s_read(indio_dev, scan_index);
 		ret = ads124s_write_cmd(indio_dev, ADS124S08_STOP_CONV);
 		if (ret)
 			dev_err(&priv->spi->dev, "Stop ADC conversions failed\n");
@@ -357,7 +358,7 @@ MODULE_DEVICE_TABLE(spi, ads124s_id);
 static const struct of_device_id ads124s_of_table[] = {
 	{ .compatible = "ti,ads124s06" },
 	{ .compatible = "ti,ads124s08" },
-	{ }
+	{ },
 };
 MODULE_DEVICE_TABLE(of, ads124s_of_table);
 

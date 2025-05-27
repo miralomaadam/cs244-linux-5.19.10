@@ -19,7 +19,7 @@ int  sysctl_dccp_retries2		__read_mostly = TCP_RETR2;
 
 static void dccp_write_err(struct sock *sk)
 {
-	sk->sk_err = READ_ONCE(sk->sk_err_soft) ? : ETIMEDOUT;
+	sk->sk_err = sk->sk_err_soft ? : ETIMEDOUT;
 	sk_error_report(sk);
 
 	dccp_send_reset(sk, DCCP_RESET_CODE_ABORTED);
@@ -139,9 +139,9 @@ static void dccp_write_timer(struct timer_list *t)
 	if (sk->sk_state == DCCP_CLOSED || !icsk->icsk_pending)
 		goto out;
 
-	if (time_after(icsk_timeout(icsk), jiffies)) {
+	if (time_after(icsk->icsk_timeout, jiffies)) {
 		sk_reset_timer(sk, &icsk->icsk_retransmit_timer,
-			       icsk_timeout(icsk));
+			       icsk->icsk_timeout);
 		goto out;
 	}
 
@@ -185,9 +185,9 @@ static void dccp_delack_timer(struct timer_list *t)
 	if (sk->sk_state == DCCP_CLOSED ||
 	    !(icsk->icsk_ack.pending & ICSK_ACK_TIMER))
 		goto out;
-	if (time_after(icsk_delack_timeout(icsk), jiffies)) {
+	if (time_after(icsk->icsk_ack.timeout, jiffies)) {
 		sk_reset_timer(sk, &icsk->icsk_delack_timer,
-			       icsk_delack_timeout(icsk));
+			       icsk->icsk_ack.timeout);
 		goto out;
 	}
 
@@ -196,8 +196,8 @@ static void dccp_delack_timer(struct timer_list *t)
 	if (inet_csk_ack_scheduled(sk)) {
 		if (!inet_csk_in_pingpong_mode(sk)) {
 			/* Delayed ACK missed: inflate ATO. */
-			icsk->icsk_ack.ato = min_t(u32, icsk->icsk_ack.ato << 1,
-						   icsk->icsk_rto);
+			icsk->icsk_ack.ato = min(icsk->icsk_ack.ato << 1,
+						 icsk->icsk_rto);
 		} else {
 			/* Delayed ACK missed: leave pingpong mode and
 			 * deflate ATO.

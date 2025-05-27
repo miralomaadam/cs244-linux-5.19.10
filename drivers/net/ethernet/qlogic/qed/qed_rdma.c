@@ -42,7 +42,8 @@ int qed_rdma_bmap_alloc(struct qed_hwfn *p_hwfn,
 
 	bmap->max_count = max_count;
 
-	bmap->bitmap = bitmap_zalloc(max_count, GFP_KERNEL);
+	bmap->bitmap = kcalloc(BITS_TO_LONGS(max_count), sizeof(long),
+			       GFP_KERNEL);
 	if (!bmap->bitmap)
 		return -ENOMEM;
 
@@ -106,7 +107,7 @@ int qed_bmap_test_id(struct qed_hwfn *p_hwfn,
 
 static bool qed_bmap_is_empty(struct qed_bmap *bmap)
 {
-	return bitmap_empty(bmap->bitmap, bmap->max_count);
+	return bmap->max_count == find_first_bit(bmap->bitmap, bmap->max_count);
 }
 
 static u32 qed_rdma_get_sb_id(void *p_hwfn, u32 rel_sb_id)
@@ -342,7 +343,7 @@ void qed_rdma_bmap_free(struct qed_hwfn *p_hwfn,
 	}
 
 end:
-	bitmap_free(bmap->bitmap);
+	kfree(bmap->bitmap);
 	bmap->bitmap = NULL;
 }
 
@@ -1792,6 +1793,8 @@ qed_rdma_create_srq(void *rdma_cxt,
 	rc = qed_cxt_dynamic_ilt_alloc(p_hwfn, elem_type, returned_id);
 	if (rc)
 		goto err;
+
+	opaque_fid = p_hwfn->hw_info.opaque_fid;
 
 	opaque_fid = p_hwfn->hw_info.opaque_fid;
 	init_data.opaque_fid = opaque_fid;

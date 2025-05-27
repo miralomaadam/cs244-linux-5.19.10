@@ -144,10 +144,11 @@ static int buffer_prepare(struct vb2_buffer *vb)
 		return -EINVAL;
 	vb2_set_plane_payload(vb, 0, size);
 
-	return cx88_risc_buffer(dev->pci, &buf->risc, sgt->sgl,
-				0, VBI_LINE_LENGTH * lines,
-				VBI_LINE_LENGTH, 0,
-				lines);
+	cx88_risc_buffer(dev->pci, &buf->risc, sgt->sgl,
+			 0, VBI_LINE_LENGTH * lines,
+			 VBI_LINE_LENGTH, 0,
+			 lines);
+	return 0;
 }
 
 static void buffer_finish(struct vb2_buffer *vb)
@@ -228,6 +229,8 @@ const struct vb2_ops cx8800_vbi_qops = {
 	.buf_prepare  = buffer_prepare,
 	.buf_finish = buffer_finish,
 	.buf_queue    = buffer_queue,
+	.wait_prepare = vb2_ops_wait_prepare,
+	.wait_finish = vb2_ops_wait_finish,
 	.start_streaming = start_streaming,
 	.stop_streaming = stop_streaming,
 };

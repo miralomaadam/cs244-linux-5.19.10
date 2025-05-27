@@ -5,7 +5,6 @@
 #include "tool.h"
 #include "evswitch.h"
 #include "annotate.h"
-#include "mutex.h"
 #include "ordered-events.h"
 #include "record.h"
 #include <linux/types.h>
@@ -21,6 +20,7 @@ struct perf_top {
 	struct perf_tool   tool;
 	struct evlist *evlist, *sb_evlist;
 	struct record_opts record_opts;
+	struct annotation_options annotation_opts;
 	struct evswitch	   evswitch;
 	/*
 	 * Symbols will be added here in perf_event__process_sample and will
@@ -53,8 +53,8 @@ struct perf_top {
 		struct ordered_events	*in;
 		struct ordered_events	 data[2];
 		bool			 rotate;
-		struct mutex mutex;
-		struct cond cond;
+		pthread_mutex_t		 mutex;
+		pthread_cond_t		 cond;
 	} qe;
 };
 

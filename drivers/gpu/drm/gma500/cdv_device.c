@@ -5,10 +5,10 @@
  *
  **************************************************************************/
 
+#include <linux/backlight.h>
 #include <linux/delay.h>
 
 #include <drm/drm.h>
-#include <drm/drm_crtc_helper.h>
 
 #include "cdv_device.h"
 #include "gma_device.h"
@@ -62,9 +62,13 @@ static int cdv_output_init(struct drm_device *dev)
 	return 0;
 }
 
+#ifdef CONFIG_BACKLIGHT_CLASS_DEVICE
+
 /*
  *	Cedartrail Backlght Interfaces
  */
+
+static struct backlight_device *cdv_backlight_device;
 
 static int cdv_backlight_combination_mode(struct drm_device *dev)
 {
@@ -88,8 +92,9 @@ static u32 cdv_get_max_backlight(struct drm_device *dev)
 	return max;
 }
 
-static int cdv_get_brightness(struct drm_device *dev)
+static int cdv_get_brightness(struct backlight_device *bd)
 {
+	struct drm_device *dev = bl_get_data(bd);
 	struct pci_dev *pdev = to_pci_dev(dev->dev);
 	u32 val = REG_READ(BLC_PWM_CTL) & BACKLIGHT_DUTY_CYCLE_MASK;
 
@@ -101,12 +106,19 @@ static int cdv_get_brightness(struct drm_device *dev)
 		val *= lbpc;
 	}
 	return (val * 100)/cdv_get_max_backlight(dev);
+
 }
 
-static void cdv_set_brightness(struct drm_device *dev, int level)
+static int cdv_set_brightness(struct backlight_device *bd)
 {
+	struct drm_device *dev = bl_get_data(bd);
 	struct pci_dev *pdev = to_pci_dev(dev->dev);
+	int level = bd->props.brightness;
 	u32 blc_pwm_ctl;
+
+	/* Percentage 1-100% being valid */
+	if (level < 1)
+		level = 1;
 
 	level *= cdv_get_max_backlight(dev);
 	level /= 100;
@@ -124,17 +136,37 @@ static void cdv_set_brightness(struct drm_device *dev, int level)
 	blc_pwm_ctl = REG_READ(BLC_PWM_CTL) & ~BACKLIGHT_DUTY_CYCLE_MASK;
 	REG_WRITE(BLC_PWM_CTL, (blc_pwm_ctl |
 				(level << BACKLIGHT_DUTY_CYCLE_SHIFT)));
+	return 0;
 }
+
+static const struct backlight_ops cdv_ops = {
+	.get_brightness = cdv_get_brightness,
+	.update_status  = cdv_set_brightness,
+};
 
 static int cdv_backlight_init(struct drm_device *dev)
 {
 	struct drm_psb_private *dev_priv = to_drm_psb_private(dev);
+	struct backlight_properties props;
 
-	dev_priv->backlight_level = cdv_get_brightness(dev);
-	cdv_set_brightness(dev, dev_priv->backlight_level);
+	memset(&props, 0, sizeof(struct backlight_properties));
+	props.max_brightness = 100;
+	props.type = BACKLIGHT_PLATFORM;
 
+	cdv_backlight_device = backlight_device_register("psb-bl",
+					NULL, (void *)dev, &cdv_ops, &props);
+	if (IS_ERR(cdv_backlight_device))
+		return PTR_ERR(cdv_backlight_device);
+
+	cdv_backlight_device->props.brightness =
+			cdv_get_brightness(cdv_backlight_device);
+	backlight_update_status(cdv_backlight_device);
+	dev_priv->backlight_device = cdv_backlight_device;
+	dev_priv->backlight_enabled = true;
 	return 0;
 }
+
+#endif
 
 /*
  *	Provide the Cedarview specific chip logic and low level methods
@@ -215,7 +247,7 @@ static void cdv_errata(struct drm_device *dev)
 	 *	Bonus Launch to work around the issue, by degrading
 	 *	performance.
 	 */
-	CDV_MSG_WRITE32(pci_domain_nr(pdev->bus), 3, 0x30, 0x08027108);
+	 CDV_MSG_WRITE32(pci_domain_nr(pdev->bus), 3, 0x30, 0x08027108);
 }
 
 /**
@@ -549,9 +581,11 @@ static const struct psb_offset cdv_regmap[2] = {
 static int cdv_chip_setup(struct drm_device *dev)
 {
 	struct drm_psb_private *dev_priv = to_drm_psb_private(dev);
+	struct pci_dev *pdev = to_pci_dev(dev->dev);
 	INIT_WORK(&dev_priv->hotplug_work, cdv_hotplug_work_func);
 
-	dev_priv->use_msi = true;
+	if (pci_enable_msi(pdev))
+		dev_warn(dev->dev, "Enabling MSI failed!\n");
 	dev_priv->regmap = cdv_regmap;
 	gma_get_core_freq(dev);
 	psb_intel_opregion_init(dev);
@@ -581,10 +615,9 @@ const struct psb_ops cdv_chip_ops = {
 	.hotplug = cdv_hotplug_event,
 	.hotplug_enable = cdv_hotplug_enable,
 
+#ifdef CONFIG_BACKLIGHT_CLASS_DEVICE
 	.backlight_init = cdv_backlight_init,
-	.backlight_get = cdv_get_brightness,
-	.backlight_set = cdv_set_brightness,
-	.backlight_name = "psb-bl",
+#endif
 
 	.init_pm = cdv_init_pm,
 	.save_regs = cdv_save_display_registers,

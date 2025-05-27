@@ -15,10 +15,10 @@
 #else
 #define MODULE_VERMAGIC_SMP ""
 #endif
-#ifdef CONFIG_PREEMPT_RT
-#define MODULE_VERMAGIC_PREEMPT "preempt_rt "
-#elif defined(CONFIG_PREEMPT_BUILD)
+#ifdef CONFIG_PREEMPT_BUILD
 #define MODULE_VERMAGIC_PREEMPT "preempt "
+#elif defined(CONFIG_PREEMPT_RT)
+#define MODULE_VERMAGIC_PREEMPT "preempt_rt "
 #else
 #define MODULE_VERMAGIC_PREEMPT ""
 #endif

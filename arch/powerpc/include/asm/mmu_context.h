@@ -31,6 +31,7 @@ extern long mm_iommu_newdev(struct mm_struct *mm, unsigned long ua,
 extern long mm_iommu_put(struct mm_struct *mm,
 		struct mm_iommu_table_group_mem_t *mem);
 extern void mm_iommu_init(struct mm_struct *mm);
+extern void mm_iommu_cleanup(struct mm_struct *mm);
 extern struct mm_iommu_table_group_mem_t *mm_iommu_lookup(struct mm_struct *mm,
 		unsigned long ua, unsigned long size);
 extern struct mm_iommu_table_group_mem_t *mm_iommu_get(struct mm_struct *mm,
@@ -116,6 +117,10 @@ static inline bool need_extra_context(struct mm_struct *mm, unsigned long ea)
 }
 #endif
 
+extern void switch_cop(struct mm_struct *next);
+extern int use_cop(unsigned long acop, struct mm_struct *mm);
+extern void drop_cop(unsigned long acop, struct mm_struct *mm);
+
 #ifdef CONFIG_PPC_BOOK3S_64
 static inline void inc_mm_active_cpus(struct mm_struct *mm)
 {
@@ -124,7 +129,6 @@ static inline void inc_mm_active_cpus(struct mm_struct *mm)
 
 static inline void dec_mm_active_cpus(struct mm_struct *mm)
 {
-	VM_WARN_ON_ONCE(atomic_read(&mm->context.active_cpus) <= 0);
 	atomic_dec(&mm->context.active_cpus);
 }
 
@@ -149,8 +153,8 @@ static inline void mm_context_remove_copro(struct mm_struct *mm)
 	 * nMMU and/or PSL need to be cleaned up.
 	 *
 	 * Both the 'copros' and 'active_cpus' counts are looked at in
-	 * radix__flush_all_mm() to determine the scope (local/global)
-	 * of the TLBIs, so we need to flush first before decrementing
+	 * flush_all_mm() to determine the scope (local/global) of the
+	 * TLBIs, so we need to flush first before decrementing
 	 * 'copros'. If this API is used by several callers for the
 	 * same context, it can lead to over-flushing. It's hopefully
 	 * not common enough to be a problem.
@@ -162,7 +166,7 @@ static inline void mm_context_remove_copro(struct mm_struct *mm)
 	 * in-between.
 	 */
 	if (radix_enabled()) {
-		radix__flush_all_mm(mm);
+		flush_all_mm(mm);
 
 		c = atomic_dec_if_positive(&mm->context.copros);
 		/* Detect imbalance between add and remove */
@@ -256,6 +260,15 @@ static inline void enter_lazy_tlb(struct mm_struct *mm,
 #endif
 
 extern void arch_exit_mmap(struct mm_struct *mm);
+
+static inline void arch_unmap(struct mm_struct *mm,
+			      unsigned long start, unsigned long end)
+{
+	unsigned long vdso_base = (unsigned long)mm->context.vdso;
+
+	if (start <= vdso_base && vdso_base < end)
+		mm->context.vdso = NULL;
+}
 
 #ifdef CONFIG_PPC_MEM_KEYS
 bool arch_vma_access_permitted(struct vm_area_struct *vma, bool write,

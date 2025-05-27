@@ -8,7 +8,7 @@
  * device tree nodes in this file.
  */
 
-#include "exynos-pinctrl.h"
+#include <dt-bindings/pinctrl/samsung.h>
 
 &pinctrl_alive {
 	gpa0: gpa0-gpio-bank {

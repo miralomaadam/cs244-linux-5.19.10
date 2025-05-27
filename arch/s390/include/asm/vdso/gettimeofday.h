@@ -6,15 +6,23 @@
 
 #define VDSO_HAS_CLOCK_GETRES 1
 
-#define VDSO_DELTA_NOMASK 1
-
 #include <asm/syscall.h>
 #include <asm/timex.h>
 #include <asm/unistd.h>
 #include <linux/compiler.h>
 
+#define vdso_calc_delta __arch_vdso_calc_delta
+static __always_inline u64 __arch_vdso_calc_delta(u64 cycles, u64 last, u64 mask, u32 mult)
+{
+	return (cycles - last) * mult;
+}
 
-static inline u64 __arch_get_hw_counter(s32 clock_mode, const struct vdso_time_data *vd)
+static __always_inline const struct vdso_data *__arch_get_vdso_data(void)
+{
+	return _vdso_data;
+}
+
+static inline u64 __arch_get_hw_counter(s32 clock_mode, const struct vdso_data *vd)
 {
 	u64 adj, now;
 
@@ -43,5 +51,13 @@ long clock_getres_fallback(clockid_t clkid, struct __kernel_timespec *ts)
 {
 	return syscall2(__NR_clock_getres, (long)clkid, (long)ts);
 }
+
+#ifdef CONFIG_TIME_NS
+static __always_inline
+const struct vdso_data *__arch_get_timens_vdso_data(const struct vdso_data *vd)
+{
+	return _timens_data;
+}
+#endif
 
 #endif

@@ -416,7 +416,7 @@ static void __qla2x00_release_all_sadb(struct scsi_qla_host *vha,
 				 */
 				if (edif_entry->delete_sa_index !=
 						INVALID_EDIF_SA_INDEX) {
-					timer_shutdown(&edif_entry->timer);
+					del_timer(&edif_entry->timer);
 
 					/* build and send the aen */
 					fcport->edif.rx_sa_set = 1;
@@ -480,49 +480,6 @@ void qla2x00_release_all_sadb(struct scsi_qla_host *vha, struct fc_port *fcport)
 }
 
 /**
- * qla_delete_n2n_sess_and_wait: search for N2N session, tear it down and
- *    wait for tear down to complete.  In N2N topology, there is only one
- *    session being active in tracking the remote device.
- * @vha: host adapter pointer
- * return code:  0 - found the session and completed the tear down.
- *	1 - timeout occurred.  Caller to use link bounce to reset.
- */
-static int qla_delete_n2n_sess_and_wait(scsi_qla_host_t *vha)
-{
-	struct fc_port *fcport;
-	int rc = -EIO;
-	ulong expire = jiffies + 23 * HZ;
-
-	if (!N2N_TOPO(vha->hw))
-		return 0;
-
-	fcport = NULL;
-	list_for_each_entry(fcport, &vha->vp_fcports, list) {
-		if (!fcport->n2n_flag)
-			continue;
-
-		ql_dbg(ql_dbg_disc, fcport->vha, 0x2016,
-		       "%s reset sess at app start \n", __func__);
-
-		qla_edif_sa_ctl_init(vha, fcport);
-		qlt_schedule_sess_for_deletion(fcport);
-
-		while (time_before_eq(jiffies, expire)) {
-			if (fcport->disc_state != DSC_DELETE_PEND) {
-				rc = 0;
-				break;
-			}
-			msleep(1);
-		}
-
-		set_bit(RELOGIN_NEEDED, &vha->dpc_flags);
-		break;
-	}
-
-	return rc;
-}
-
-/**
  * qla_edif_app_start:  application has announce its present
  * @vha: host adapter pointer
  * @bsg_job: user request
@@ -561,17 +518,18 @@ qla_edif_app_start(scsi_qla_host_t *vha, struct bsg_job *bsg_job)
 			fcport->n2n_link_reset_cnt = 0;
 
 		if (vha->hw->flags.n2n_fw_acc_sec) {
-			bool link_bounce = false;
+			list_for_each_entry_safe(fcport, tf, &vha->vp_fcports, list)
+				qla_edif_sa_ctl_init(vha, fcport);
+
 			/*
 			 * While authentication app was not running, remote device
 			 * could still try to login with this local port.  Let's
-			 * reset the session, reconnect and re-authenticate.
+			 * clear the state and try again.
 			 */
-			if (qla_delete_n2n_sess_and_wait(vha))
-				link_bounce = true;
+			qla2x00_wait_for_sess_deletion(vha);
 
-			/* bounce the link to start login */
-			if (!vha->hw->flags.n2n_bigger || link_bounce) {
+			/* bounce the link to get the other guy to relogin */
+			if (!vha->hw->flags.n2n_bigger) {
 				set_bit(N2N_LINK_RESET, &vha->dpc_flags);
 				qla2xxx_wake_dpc(vha);
 			}
@@ -967,9 +925,7 @@ qla_edif_app_getfcinfo(scsi_qla_host_t *vha, struct bsg_job *bsg_job)
 			if (!(fcport->flags & FCF_FCSP_DEVICE))
 				continue;
 
-			tdid.b.domain = app_req.remote_pid.domain;
-			tdid.b.area = app_req.remote_pid.area;
-			tdid.b.al_pa = app_req.remote_pid.al_pa;
+			tdid = app_req.remote_pid;
 
 			ql_dbg(ql_dbg_edif, vha, 0x2058,
 			    "APP request entry - portid=%06x.\n", tdid.b24);
@@ -1100,7 +1056,7 @@ qla_edif_app_getstats(scsi_qla_host_t *vha, struct bsg_job *bsg_job)
 
 		list_for_each_entry_safe(fcport, tf, &vha->vp_fcports, list) {
 			if (fcport->edif.enable) {
-				if (pcnt >= app_req.num_ports)
+				if (pcnt > app_req.num_ports)
 					break;
 
 				app_reply->elem[pcnt].rekey_count =
@@ -1595,7 +1551,7 @@ qla24xx_sadb_update(struct bsg_job *bsg_job)
 		ql_dbg(ql_dbg_edif, vha, 0x70a3, "Failed to find port= %06x\n",
 		    sa_frame.port_id.b24);
 		rval = -EINVAL;
-		SET_DID_STATUS(bsg_reply->result, DID_NO_CONNECT);
+		SET_DID_STATUS(bsg_reply->result, DID_TARGET_FAILURE);
 		goto done;
 	}
 
@@ -2334,6 +2290,84 @@ qla_edif_timer(scsi_qla_host_t *vha)
 		qla_edif_dbell_bsg_done(vha);
 }
 
+/*
+ * app uses separate thread to read this. It'll wait until the doorbell
+ * is rung by the driver or the max wait time has expired
+ */
+ssize_t
+edif_doorbell_show(struct device *dev, struct device_attribute *attr,
+		char *buf)
+{
+	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
+	struct edb_node	*dbnode = NULL;
+	struct edif_app_dbell *ap = (struct edif_app_dbell *)buf;
+	uint32_t dat_siz, buf_size, sz;
+
+	/* TODO: app currently hardcoded to 256. Will transition to bsg */
+	sz = 256;
+
+	/* stop new threads from waiting if we're not init'd */
+	if (DBELL_INACTIVE(vha)) {
+		ql_dbg(ql_dbg_edif + ql_dbg_verbose, vha, 0x09122,
+		    "%s error - edif db not enabled\n", __func__);
+		return 0;
+	}
+
+	if (!vha->hw->flags.edif_enabled) {
+		/* edif not enabled */
+		ql_dbg(ql_dbg_edif + ql_dbg_verbose, vha, 0x09122,
+		    "%s error - edif not enabled\n", __func__);
+		return -1;
+	}
+
+	buf_size = 0;
+	while ((sz - buf_size) >= sizeof(struct edb_node)) {
+		/* remove the next item from the doorbell list */
+		dat_siz = 0;
+		dbnode = qla_edb_getnext(vha);
+		if (dbnode) {
+			ap->event_code = dbnode->ntype;
+			switch (dbnode->ntype) {
+			case VND_CMD_AUTH_STATE_SESSION_SHUTDOWN:
+			case VND_CMD_AUTH_STATE_NEEDED:
+				ap->port_id = dbnode->u.plogi_did;
+				dat_siz += sizeof(ap->port_id);
+				break;
+			case VND_CMD_AUTH_STATE_ELS_RCVD:
+				ap->port_id = dbnode->u.els_sid;
+				dat_siz += sizeof(ap->port_id);
+				break;
+			case VND_CMD_AUTH_STATE_SAUPDATE_COMPL:
+				ap->port_id = dbnode->u.sa_aen.port_id;
+				memcpy(ap->event_data, &dbnode->u,
+						sizeof(struct edif_sa_update_aen));
+				dat_siz += sizeof(struct edif_sa_update_aen);
+				break;
+			default:
+				/* unknown node type, rtn unknown ntype */
+				ap->event_code = VND_CMD_AUTH_STATE_UNDEF;
+				memcpy(ap->event_data, &dbnode->ntype, 4);
+				dat_siz += 4;
+				break;
+			}
+
+			ql_dbg(ql_dbg_edif, vha, 0x09102,
+				"%s Doorbell consumed : type=%d %p\n",
+				__func__, dbnode->ntype, dbnode);
+			/* we're done with the db node, so free it up */
+			kfree(dbnode);
+		} else {
+			break;
+		}
+
+		ap->event_data_size = dat_siz;
+		/* 8bytes = ap->event_code + ap->event_data_size */
+		buf_size += dat_siz + 8;
+		ap = (struct edif_app_dbell *)(buf + buf_size);
+	}
+	return buf_size;
+}
+
 static void qla_noop_sp_done(srb_t *sp, int res)
 {
 	sp->fcport->flags &= ~(FCF_ASYNC_SENT | FCF_ASYNC_ACTIVE);
@@ -2361,8 +2395,8 @@ qla24xx_issue_sa_replace_iocb(scsi_qla_host_t *vha, struct qla_work_evt *e)
 	if (!sa_ctl) {
 		ql_dbg(ql_dbg_edif, vha, 0x70e6,
 		    "sa_ctl allocation failed\n");
-		rval = -ENOMEM;
-		return rval;
+		rval =  -ENOMEM;
+		goto done;
 	}
 
 	fcport = sa_ctl->fcport;
@@ -2843,7 +2877,7 @@ qla28xx_sa_update_iocb_entry(scsi_qla_host_t *v, struct req_que *req,
 			    "%s: removing edif_entry %p, new sa_index: 0x%x\n",
 			    __func__, edif_entry, pkt->sa_index);
 			qla_edif_list_delete_sa_index(sp->fcport, edif_entry);
-			timer_shutdown(&edif_entry->timer);
+			del_timer(&edif_entry->timer);
 
 			ql_dbg(ql_dbg_edif, vha, 0x5033,
 			    "%s: releasing edif_entry %p, new sa_index: 0x%x\n",
@@ -3032,13 +3066,6 @@ qla28xx_start_scsi_edif(srb_t *sp)
 
 	tot_dsds = nseg;
 	req_cnt = qla24xx_calc_iocbs(vha, tot_dsds);
-
-	sp->iores.res_type = RESOURCE_IOCB | RESOURCE_EXCH;
-	sp->iores.exch_cnt = 1;
-	sp->iores.iocb_cnt = req_cnt;
-	if (qla_get_fw_resources(sp->qpair, &sp->iores))
-		goto queuing_error;
-
 	if (req->cnt < (req_cnt + 2)) {
 		cnt = IS_SHADOW_REG_CAPABLE(ha) ? *req->out_ptr :
 		    rd_reg_dword(req->req_q_out);
@@ -3051,16 +3078,26 @@ qla28xx_start_scsi_edif(srb_t *sp)
 			goto queuing_error;
 	}
 
-	if (qla_get_buf(vha, sp->qpair, &sp->u.scmd.buf_dsc)) {
-		ql_log(ql_log_fatal, vha, 0x3011,
-		    "Failed to allocate buf for fcp_cmnd for cmd=%p.\n", cmd);
+	ctx = sp->u.scmd.ct6_ctx =
+	    mempool_alloc(ha->ctx_mempool, GFP_ATOMIC);
+	if (!ctx) {
+		ql_log(ql_log_fatal, vha, 0x3010,
+		    "Failed to allocate ctx for cmd=%p.\n", cmd);
 		goto queuing_error;
 	}
 
-	sp->flags |= SRB_GOT_BUF;
-	ctx = &sp->u.scmd.ct6_ctx;
-	ctx->fcp_cmnd = sp->u.scmd.buf_dsc.buf;
-	ctx->fcp_cmnd_dma = sp->u.scmd.buf_dsc.buf_dma;
+	memset(ctx, 0, sizeof(struct ct6_dsd));
+	ctx->fcp_cmnd = dma_pool_zalloc(ha->fcp_cmnd_dma_pool,
+	    GFP_ATOMIC, &ctx->fcp_cmnd_dma);
+	if (!ctx->fcp_cmnd) {
+		ql_log(ql_log_fatal, vha, 0x3011,
+		    "Failed to allocate fcp_cmnd for cmd=%p.\n", cmd);
+		goto queuing_error;
+	}
+
+	/* Initialize the DSD list and dma handle */
+	INIT_LIST_HEAD(&ctx->dsd_list);
+	ctx->dsd_use_cnt = 0;
 
 	if (cmd->cmd_len > 16) {
 		additional_cdb_len = cmd->cmd_len - 16;
@@ -3179,6 +3216,7 @@ no_dsds:
 	cmd_pkt->fcp_cmnd_dseg_len = cpu_to_le16(ctx->fcp_cmnd_len);
 	put_unaligned_le64(ctx->fcp_cmnd_dma, &cmd_pkt->fcp_cmnd_dseg_address);
 
+	sp->flags |= SRB_FCP_CMND_DMA_VALID;
 	cmd_pkt->byte_count = cpu_to_le32((uint32_t)scsi_bufflen(cmd));
 	/* Set total data segment count. */
 	cmd_pkt->entry_count = (uint8_t)req_cnt;
@@ -3210,12 +3248,15 @@ no_dsds:
 	return QLA_SUCCESS;
 
 queuing_error_fcp_cmnd:
+	dma_pool_free(ha->fcp_cmnd_dma_pool, ctx->fcp_cmnd, ctx->fcp_cmnd_dma);
 queuing_error:
 	if (tot_dsds)
 		scsi_dma_unmap(cmd);
 
-	qla_put_buf(sp->qpair, &sp->u.scmd.buf_dsc);
-	qla_put_fw_resources(sp->qpair, &sp->iores);
+	if (sp->u.scmd.ct6_ctx) {
+		mempool_free(sp->u.scmd.ct6_ctx, ha->ctx_mempool);
+		sp->u.scmd.ct6_ctx = NULL;
+	}
 	spin_unlock_irqrestore(lock, flags);
 
 	return QLA_FUNCTION_FAILED;

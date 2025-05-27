@@ -2,7 +2,7 @@
 /*
  * Rockchip SoC DP (Display Port) interface driver.
  *
- * Copyright (C) Rockchip Electronics Co., Ltd.
+ * Copyright (C) Fuzhou Rockchip Electronics Co., Ltd.
  * Author: Andy Yan <andy.yan@rock-chips.com>
  *         Yakir Yang <ykk@rock-chips.com>
  *         Jeff Chen <jeff.chen@rock-chips.com>
@@ -10,10 +10,8 @@
 
 #include <linux/component.h>
 #include <linux/mfd/syscon.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/of_graph.h>
-#include <linux/platform_device.h>
-#include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
 #include <linux/clk.h>
@@ -31,33 +29,29 @@
 #include <drm/drm_simple_kms_helper.h>
 
 #include "rockchip_drm_drv.h"
+#include "rockchip_drm_vop.h"
+
+#define RK3288_GRF_SOC_CON6		0x25c
+#define RK3288_EDP_LCDC_SEL		BIT(5)
+#define RK3399_GRF_SOC_CON20		0x6250
+#define RK3399_EDP_LCDC_SEL		BIT(5)
+
+#define HIWORD_UPDATE(val, mask)	(val | (mask) << 16)
 
 #define PSR_WAIT_LINE_FLAG_TIMEOUT_MS	100
 
-#define GRF_REG_FIELD(_reg, _lsb, _msb) {	\
-				.reg = _reg,	\
-				.lsb = _lsb,	\
-				.msb = _msb,	\
-				.valid = true,	\
-				}
-
-struct rockchip_grf_reg_field {
-	u32 reg;
-	u32 lsb;
-	u32 msb;
-	bool valid;
-};
-
 /**
  * struct rockchip_dp_chip_data - splite the grf setting of kind of chips
- * @lcdc_sel: grf register field of lcdc_sel
+ * @lcdsel_grf_reg: grf register offset of lcdc select
+ * @lcdsel_big: reg value of selecting vop big for eDP
+ * @lcdsel_lit: reg value of selecting vop little for eDP
  * @chip_type: specific chip type
- * @reg: register base address
  */
 struct rockchip_dp_chip_data {
-	const struct rockchip_grf_reg_field lcdc_sel;
+	u32	lcdsel_grf_reg;
+	u32	lcdsel_big;
+	u32	lcdsel_lit;
 	u32	chip_type;
-	u32	reg;
 };
 
 struct rockchip_dp_device {
@@ -89,26 +83,6 @@ static struct rockchip_dp_device *pdata_encoder_to_dp(struct analogix_dp_plat_da
 	return container_of(plat_data, struct rockchip_dp_device, plat_data);
 }
 
-static int rockchip_grf_write(struct regmap *grf, u32 reg, u32 mask, u32 val)
-{
-	return regmap_write(grf, reg, (mask << 16) | (val & mask));
-}
-
-static int rockchip_grf_field_write(struct regmap *grf,
-				    const struct rockchip_grf_reg_field *field,
-				    u32 val)
-{
-	u32 mask;
-
-	if (!field->valid)
-		return 0;
-
-	mask = GENMASK(field->msb, field->lsb);
-	val <<= field->lsb;
-
-	return rockchip_grf_write(grf, field->reg, mask, val);
-}
-
 static int rockchip_dp_pre_init(struct rockchip_dp_device *dp)
 {
 	reset_control_assert(dp->rst);
@@ -118,7 +92,7 @@ static int rockchip_dp_pre_init(struct rockchip_dp_device *dp)
 	return 0;
 }
 
-static int rockchip_dp_poweron(struct analogix_dp_plat_data *plat_data)
+static int rockchip_dp_poweron_start(struct analogix_dp_plat_data *plat_data)
 {
 	struct rockchip_dp_device *dp = pdata_encoder_to_dp(plat_data);
 	int ret;
@@ -206,6 +180,7 @@ static void rockchip_dp_drm_encoder_enable(struct drm_encoder *encoder,
 	struct drm_crtc *crtc;
 	struct drm_crtc_state *old_crtc_state;
 	int ret;
+	u32 val;
 
 	crtc = rockchip_dp_drm_get_new_crtc(encoder, state);
 	if (!crtc)
@@ -216,19 +191,24 @@ static void rockchip_dp_drm_encoder_enable(struct drm_encoder *encoder,
 	if (old_crtc_state && old_crtc_state->self_refresh_active)
 		return;
 
+	ret = drm_of_encoder_active_endpoint_id(dp->dev->of_node, encoder);
+	if (ret < 0)
+		return;
+
+	if (ret)
+		val = dp->data->lcdsel_lit;
+	else
+		val = dp->data->lcdsel_big;
+
+	DRM_DEV_DEBUG(dp->dev, "vop %s output to dp\n", (ret) ? "LIT" : "BIG");
+
 	ret = clk_prepare_enable(dp->grfclk);
 	if (ret < 0) {
 		DRM_DEV_ERROR(dp->dev, "failed to enable grfclk %d\n", ret);
 		return;
 	}
 
-	ret = drm_of_encoder_active_endpoint_id(dp->dev->of_node, encoder);
-	if (ret < 0)
-		return;
-
-	DRM_DEV_DEBUG(dp->dev, "vop %s output to dp\n", (ret) ? "LIT" : "BIG");
-
-	ret = rockchip_grf_field_write(dp->grf, &dp->data->lcdc_sel, ret);
+	ret = regmap_write(dp->grf, dp->data->lcdsel_grf_reg, val);
 	if (ret != 0)
 		DRM_DEV_ERROR(dp->dev, "Could not write to GRF: %d\n", ret);
 
@@ -281,7 +261,7 @@ rockchip_dp_drm_encoder_atomic_check(struct drm_encoder *encoder,
 	return 0;
 }
 
-static const struct drm_encoder_helper_funcs rockchip_dp_encoder_helper_funcs = {
+static struct drm_encoder_helper_funcs rockchip_dp_encoder_helper_funcs = {
 	.mode_fixup = rockchip_dp_drm_encoder_mode_fixup,
 	.mode_set = rockchip_dp_drm_encoder_mode_set,
 	.atomic_enable = rockchip_dp_drm_encoder_enable,
@@ -363,9 +343,6 @@ static int rockchip_dp_bind(struct device *dev, struct device *master,
 		return ret;
 	}
 
-	rockchip_drm_encoder_set_crtc_endpoint_id(&dp->encoder,
-						  dev->of_node, 0, 0);
-
 	dp->plat_data.encoder = &dp->encoder.encoder;
 
 	ret = analogix_dp_bind(dp->adp, drm_dev);
@@ -398,8 +375,6 @@ static int rockchip_dp_probe(struct platform_device *pdev)
 	const struct rockchip_dp_chip_data *dp_data;
 	struct drm_panel *panel = NULL;
 	struct rockchip_dp_device *dp;
-	struct resource *res;
-	int i;
 	int ret;
 
 	dp_data = of_device_get_match_data(dev);
@@ -407,34 +382,19 @@ static int rockchip_dp_probe(struct platform_device *pdev)
 		return -ENODEV;
 
 	ret = drm_of_find_panel_or_bridge(dev->of_node, 1, 0, &panel, NULL);
-	if (ret < 0 && ret != -ENODEV)
+	if (ret < 0)
 		return ret;
 
 	dp = devm_kzalloc(dev, sizeof(*dp), GFP_KERNEL);
 	if (!dp)
 		return -ENOMEM;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-
-	i = 0;
-	while (dp_data[i].reg) {
-		if (dp_data[i].reg == res->start) {
-			dp->data = &dp_data[i];
-			break;
-		}
-
-		i++;
-	}
-
-	if (!dp->data)
-		return dev_err_probe(dev, -EINVAL, "no chip-data for %s node\n",
-				     dev->of_node->name);
-
 	dp->dev = dev;
 	dp->adp = ERR_PTR(-ENODEV);
+	dp->data = dp_data;
 	dp->plat_data.panel = panel;
 	dp->plat_data.dev_type = dp->data->chip_type;
-	dp->plat_data.power_on = rockchip_dp_poweron;
+	dp->plat_data.power_on_start = rockchip_dp_poweron_start;
 	dp->plat_data.power_off = rockchip_dp_powerdown;
 	dp->plat_data.get_modes = rockchip_dp_get_modes;
 
@@ -450,16 +410,26 @@ static int rockchip_dp_probe(struct platform_device *pdev)
 
 	ret = component_add(dev, &rockchip_dp_component_ops);
 	if (ret)
-		return ret;
+		goto err_dp_remove;
+
+	return 0;
+
+err_dp_remove:
+	analogix_dp_remove(dp->adp);
+	return ret;
+}
+
+static int rockchip_dp_remove(struct platform_device *pdev)
+{
+	struct rockchip_dp_device *dp = platform_get_drvdata(pdev);
+
+	component_del(&pdev->dev, &rockchip_dp_component_ops);
+	analogix_dp_remove(dp->adp);
 
 	return 0;
 }
 
-static void rockchip_dp_remove(struct platform_device *pdev)
-{
-	component_del(&pdev->dev, &rockchip_dp_component_ops);
-}
-
+#ifdef CONFIG_PM_SLEEP
 static int rockchip_dp_suspend(struct device *dev)
 {
 	struct rockchip_dp_device *dp = dev_get_drvdata(dev);
@@ -479,26 +449,27 @@ static int rockchip_dp_resume(struct device *dev)
 
 	return analogix_dp_resume(dp->adp);
 }
+#endif
 
-static DEFINE_RUNTIME_DEV_PM_OPS(rockchip_dp_pm_ops, rockchip_dp_suspend,
-		rockchip_dp_resume, NULL);
-
-static const struct rockchip_dp_chip_data rk3399_edp[] = {
-	{
-		.lcdc_sel = GRF_REG_FIELD(0x6250, 5, 5),
-		.chip_type = RK3399_EDP,
-		.reg = 0xff970000,
-	},
-	{ /* sentinel */ }
+static const struct dev_pm_ops rockchip_dp_pm_ops = {
+#ifdef CONFIG_PM_SLEEP
+	.suspend_late = rockchip_dp_suspend,
+	.resume_early = rockchip_dp_resume,
+#endif
 };
 
-static const struct rockchip_dp_chip_data rk3288_dp[] = {
-	{
-		.lcdc_sel = GRF_REG_FIELD(0x025c, 5, 5),
-		.chip_type = RK3288_DP,
-		.reg = 0xff970000,
-	},
-	{ /* sentinel */ }
+static const struct rockchip_dp_chip_data rk3399_edp = {
+	.lcdsel_grf_reg = RK3399_GRF_SOC_CON20,
+	.lcdsel_big = HIWORD_UPDATE(0, RK3399_EDP_LCDC_SEL),
+	.lcdsel_lit = HIWORD_UPDATE(RK3399_EDP_LCDC_SEL, RK3399_EDP_LCDC_SEL),
+	.chip_type = RK3399_EDP,
+};
+
+static const struct rockchip_dp_chip_data rk3288_dp = {
+	.lcdsel_grf_reg = RK3288_GRF_SOC_CON6,
+	.lcdsel_big = HIWORD_UPDATE(0, RK3288_EDP_LCDC_SEL),
+	.lcdsel_lit = HIWORD_UPDATE(RK3288_EDP_LCDC_SEL, RK3288_EDP_LCDC_SEL),
+	.chip_type = RK3288_DP,
 };
 
 static const struct of_device_id rockchip_dp_dt_ids[] = {
@@ -513,7 +484,7 @@ struct platform_driver rockchip_dp_driver = {
 	.remove = rockchip_dp_remove,
 	.driver = {
 		   .name = "rockchip-dp",
-		   .pm = pm_ptr(&rockchip_dp_pm_ops),
+		   .pm = &rockchip_dp_pm_ops,
 		   .of_match_table = rockchip_dp_dt_ids,
 	},
 };

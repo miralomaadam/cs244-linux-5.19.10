@@ -28,7 +28,7 @@
 /* I2C Device ID List */
 static const struct i2c_device_id si470x_i2c_id[] = {
 	/* Generic Entry */
-	{ "si470x" },
+	{ "si470x", 0 },
 	/* Terminating entry */
 	{ }
 };
@@ -461,7 +461,7 @@ err_initial:
 /*
  * si470x_i2c_remove - remove the device
  */
-static void si470x_i2c_remove(struct i2c_client *client)
+static int si470x_i2c_remove(struct i2c_client *client)
 {
 	struct si470x_device *radio = i2c_get_clientdata(client);
 
@@ -472,6 +472,7 @@ static void si470x_i2c_remove(struct i2c_client *client)
 
 	v4l2_ctrl_handler_free(&radio->hdl);
 	v4l2_device_unregister(&radio->v4l2_dev);
+	return 0;
 }
 
 
@@ -532,7 +533,7 @@ static struct i2c_driver si470x_i2c_driver = {
 		.pm		= &si470x_i2c_pm,
 #endif
 	},
-	.probe			= si470x_i2c_probe,
+	.probe_new		= si470x_i2c_probe,
 	.remove			= si470x_i2c_remove,
 	.id_table		= si470x_i2c_id,
 };

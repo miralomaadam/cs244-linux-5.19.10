@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause-Clear */
 /*
  * Copyright (c) 2019 The Linux Foundation. All rights reserved.
- * Copyright (c) 2021-2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #if !defined(_TRACE_H_) || defined(TRACE_HEADER_MULTI_READ)
@@ -48,8 +47,8 @@ TRACE_EVENT(ath11k_htt_pktlog,
 	),
 
 	TP_fast_assign(
-		__assign_str(device);
-		__assign_str(driver);
+		__assign_str(device, dev_name(ar->ab->dev));
+		__assign_str(driver, dev_driver_string(ar->ab->dev));
 		__entry->buf_len = buf_len;
 		__entry->pktlog_checksum = pktlog_checksum;
 		memcpy(__get_dynamic_array(pktlog), buf, buf_len);
@@ -77,8 +76,8 @@ TRACE_EVENT(ath11k_htt_ppdu_stats,
 	),
 
 	TP_fast_assign(
-		__assign_str(device);
-		__assign_str(driver);
+		__assign_str(device, dev_name(ar->ab->dev));
+		__assign_str(driver, dev_driver_string(ar->ab->dev));
 		__entry->len = len;
 		memcpy(__get_dynamic_array(ppdu), data, len);
 	),
@@ -105,8 +104,8 @@ TRACE_EVENT(ath11k_htt_rxdesc,
 	),
 
 	TP_fast_assign(
-		__assign_str(device);
-		__assign_str(driver);
+		__assign_str(device, dev_name(ar->ab->dev));
+		__assign_str(driver, dev_driver_string(ar->ab->dev));
 		__entry->len = len;
 		__entry->log_type = log_type;
 		memcpy(__get_dynamic_array(rxdesc), data, len);
@@ -127,12 +126,15 @@ DECLARE_EVENT_CLASS(ath11k_log_event,
 	TP_STRUCT__entry(
 		__string(device, dev_name(ab->dev))
 		__string(driver, dev_driver_string(ab->dev))
-		__vstring(msg, vaf->fmt, vaf->va)
+		__dynamic_array(char, msg, ATH11K_MSG_MAX)
 	),
 	TP_fast_assign(
-		__assign_str(device);
-		__assign_str(driver);
-		__assign_vstr(msg, vaf->fmt, vaf->va);
+		__assign_str(device, dev_name(ab->dev));
+		__assign_str(driver, dev_driver_string(ab->dev));
+		WARN_ON_ONCE(vsnprintf(__get_dynamic_array(msg),
+				       ATH11K_MSG_MAX,
+				       vaf->fmt,
+				       *vaf->va) >= ATH11K_MSG_MAX);
 	),
 	TP_printk(
 		"%s %s %s",
@@ -171,8 +173,8 @@ TRACE_EVENT(ath11k_wmi_cmd,
 	),
 
 	TP_fast_assign(
-		__assign_str(device);
-		__assign_str(driver);
+		__assign_str(device, dev_name(ab->dev));
+		__assign_str(driver, dev_driver_string(ab->dev));
 		__entry->id = id;
 		__entry->buf_len = buf_len;
 		memcpy(__get_dynamic_array(buf), buf, buf_len);
@@ -201,8 +203,8 @@ TRACE_EVENT(ath11k_wmi_event,
 	),
 
 	TP_fast_assign(
-		__assign_str(device);
-		__assign_str(driver);
+		__assign_str(device, dev_name(ab->dev));
+		__assign_str(driver, dev_driver_string(ab->dev));
 		__entry->id = id;
 		__entry->buf_len = buf_len;
 		memcpy(__get_dynamic_array(buf), buf, buf_len);
@@ -230,8 +232,8 @@ TRACE_EVENT(ath11k_log_dbg,
 	),
 
 	TP_fast_assign(
-		__assign_str(device);
-		__assign_str(driver);
+		__assign_str(device, dev_name(ab->dev));
+		__assign_str(driver, dev_driver_string(ab->dev));
 		__entry->level = level;
 		WARN_ON_ONCE(vsnprintf(__get_dynamic_array(msg),
 				       ATH11K_MSG_MAX, vaf->fmt,
@@ -262,10 +264,10 @@ TRACE_EVENT(ath11k_log_dbg_dump,
 	),
 
 	TP_fast_assign(
-		__assign_str(device);
-		__assign_str(driver);
-		__assign_str(msg);
-		__assign_str(prefix);
+		__assign_str(device, dev_name(ab->dev));
+		__assign_str(driver, dev_driver_string(ab->dev));
+		__assign_str(msg, msg);
+		__assign_str(prefix, prefix);
 		__entry->buf_len = buf_len;
 		memcpy(__get_dynamic_array(buf), buf, buf_len);
 	),
@@ -292,8 +294,8 @@ TRACE_EVENT(ath11k_wmi_diag,
 	),
 
 	TP_fast_assign(
-		__assign_str(device);
-		__assign_str(driver);
+		__assign_str(device, dev_name(ab->dev));
+		__assign_str(driver, dev_driver_string(ab->dev));
 		__entry->len = len;
 		memcpy(__get_dynamic_array(data), data, len);
 	),
@@ -303,34 +305,6 @@ TRACE_EVENT(ath11k_wmi_diag,
 		__get_str(driver),
 		__get_str(device),
 		__entry->len
-	)
-);
-
-TRACE_EVENT(ath11k_ps_timekeeper,
-	    TP_PROTO(struct ath11k *ar, const void *peer_addr,
-		     u32 peer_ps_timestamp, u8 peer_ps_state),
-	TP_ARGS(ar, peer_addr, peer_ps_timestamp, peer_ps_state),
-
-	TP_STRUCT__entry(__string(device, dev_name(ar->ab->dev))
-			 __string(driver, dev_driver_string(ar->ab->dev))
-			 __dynamic_array(u8, peer_addr, ETH_ALEN)
-			 __field(u8, peer_ps_state)
-			 __field(u32, peer_ps_timestamp)
-	),
-
-	TP_fast_assign(__assign_str(device);
-		       __assign_str(driver);
-		       memcpy(__get_dynamic_array(peer_addr), peer_addr,
-			      ETH_ALEN);
-		       __entry->peer_ps_state = peer_ps_state;
-		       __entry->peer_ps_timestamp = peer_ps_timestamp;
-	),
-
-	TP_printk("%s %s %u %u",
-		  __get_str(driver),
-		  __get_str(device),
-		  __entry->peer_ps_state,
-		  __entry->peer_ps_timestamp
 	)
 );
 

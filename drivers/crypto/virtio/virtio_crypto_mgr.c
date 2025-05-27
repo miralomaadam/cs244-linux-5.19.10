@@ -256,7 +256,7 @@ int virtcrypto_dev_start(struct virtio_crypto *vcrypto)
  * @vcrypto:    Pointer to virtio crypto device.
  *
  * Function notifies all the registered services that the virtio crypto device
- * shall no longer be used.
+ * is ready to be used.
  * To be used by virtio crypto device specific drivers.
  *
  * Return: void

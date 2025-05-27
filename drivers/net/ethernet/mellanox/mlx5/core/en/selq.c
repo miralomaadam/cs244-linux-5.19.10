@@ -7,7 +7,6 @@
 #include <linux/rcupdate.h>
 #include "en.h"
 #include "en/ptp.h"
-#include "en/htb.h"
 
 struct mlx5e_selq_params {
 	unsigned int num_regular_queues;
@@ -20,8 +19,6 @@ struct mlx5e_selq_params {
 			bool is_ptp : 1;
 		};
 	};
-	u16 htb_maj_id;
-	u16 htb_defcls;
 };
 
 int mlx5e_selq_init(struct mlx5e_selq *selq, struct mutex *state_lock)
@@ -47,8 +44,6 @@ int mlx5e_selq_init(struct mlx5e_selq *selq, struct mutex *state_lock)
 		.num_tcs = 1,
 		.is_htb = false,
 		.is_ptp = false,
-		.htb_maj_id = 0,
-		.htb_defcls = 0,
 	};
 	rcu_assign_pointer(selq->active, init_params);
 
@@ -57,7 +52,6 @@ int mlx5e_selq_init(struct mlx5e_selq *selq, struct mutex *state_lock)
 
 void mlx5e_selq_cleanup(struct mlx5e_selq *selq)
 {
-	mutex_lock(selq->state_lock);
 	WARN_ON_ONCE(selq->is_prepared);
 
 	kvfree(selq->standby);
@@ -68,51 +62,21 @@ void mlx5e_selq_cleanup(struct mlx5e_selq *selq)
 
 	kvfree(selq->standby);
 	selq->standby = NULL;
-	mutex_unlock(selq->state_lock);
 }
 
-void mlx5e_selq_prepare_params(struct mlx5e_selq *selq, struct mlx5e_params *params)
+void mlx5e_selq_prepare(struct mlx5e_selq *selq, struct mlx5e_params *params, bool htb)
 {
-	struct mlx5e_selq_params *selq_active;
-
 	lockdep_assert_held(selq->state_lock);
 	WARN_ON_ONCE(selq->is_prepared);
 
 	selq->is_prepared = true;
 
-	selq_active = rcu_dereference_protected(selq->active,
-						lockdep_is_held(selq->state_lock));
-	*selq->standby = *selq_active;
 	selq->standby->num_channels = params->num_channels;
 	selq->standby->num_tcs = mlx5e_get_dcb_num_tc(params);
 	selq->standby->num_regular_queues =
 		selq->standby->num_channels * selq->standby->num_tcs;
+	selq->standby->is_htb = htb;
 	selq->standby->is_ptp = MLX5E_GET_PFLAG(params, MLX5E_PFLAG_TX_PORT_TS);
-}
-
-bool mlx5e_selq_is_htb_enabled(struct mlx5e_selq *selq)
-{
-	struct mlx5e_selq_params *selq_active =
-		rcu_dereference_protected(selq->active, lockdep_is_held(selq->state_lock));
-
-	return selq_active->htb_maj_id;
-}
-
-void mlx5e_selq_prepare_htb(struct mlx5e_selq *selq, u16 htb_maj_id, u16 htb_defcls)
-{
-	struct mlx5e_selq_params *selq_active;
-
-	lockdep_assert_held(selq->state_lock);
-	WARN_ON_ONCE(selq->is_prepared);
-
-	selq->is_prepared = true;
-
-	selq_active = rcu_dereference_protected(selq->active,
-						lockdep_is_held(selq->state_lock));
-	*selq->standby = *selq_active;
-	selq->standby->is_htb = htb_maj_id;
-	selq->standby->htb_maj_id = htb_maj_id;
-	selq->standby->htb_defcls = htb_defcls;
 }
 
 void mlx5e_selq_apply(struct mlx5e_selq *selq)
@@ -173,21 +137,20 @@ static u16 mlx5e_select_ptpsq(struct net_device *dev, struct sk_buff *skb,
 	return selq->num_regular_queues + up;
 }
 
-static int mlx5e_select_htb_queue(struct mlx5e_priv *priv, struct sk_buff *skb,
-				  struct mlx5e_selq_params *selq)
+static int mlx5e_select_htb_queue(struct mlx5e_priv *priv, struct sk_buff *skb)
 {
 	u16 classid;
 
 	/* Order maj_id before defcls - pairs with mlx5e_htb_root_add. */
-	if ((TC_H_MAJ(skb->priority) >> 16) == selq->htb_maj_id)
+	if ((TC_H_MAJ(skb->priority) >> 16) == smp_load_acquire(&priv->htb.maj_id))
 		classid = TC_H_MIN(skb->priority);
 	else
-		classid = selq->htb_defcls;
+		classid = READ_ONCE(priv->htb.defcls);
 
 	if (!classid)
 		return 0;
 
-	return mlx5e_htb_get_txq_by_classid(priv->htb, classid);
+	return mlx5e_get_txq_by_classid(priv, classid);
 }
 
 u16 mlx5e_select_queue(struct net_device *dev, struct sk_buff *skb,
@@ -224,10 +187,10 @@ u16 mlx5e_select_queue(struct net_device *dev, struct sk_buff *skb,
 			up * selq->num_channels;
 	}
 
-	if (unlikely(selq->htb_maj_id)) {
+	if (unlikely(selq->is_htb)) {
 		/* num_tcs == 1, shortcut for PTP */
 
-		txq_ix = mlx5e_select_htb_queue(priv, skb, selq);
+		txq_ix = mlx5e_select_htb_queue(priv, skb);
 		if (txq_ix > 0)
 			return txq_ix;
 

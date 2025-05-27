@@ -162,6 +162,16 @@ Currently, the types available are:
 
   - The device is able to do memory to memory copies
 
+- - DMA_MEMCPY_SG
+
+  - The device supports memory to memory scatter-gather transfers.
+
+  - Even though a plain memcpy can look like a particular case of a
+    scatter-gather transfer, with a single chunk to copy, it's a distinct
+    transaction type in the mem2mem transfer case. This is because some very
+    simple devices might be able to do contiguous single-chunk memory copies,
+    but have no support for more complex SG transfers.
+
   - No matter what the overall size of the combined chunks for source and
     destination is, only as many bytes as the smallest of the two will be
     transmitted. That means the number and size of the scatter-gather buffers in
@@ -433,12 +443,6 @@ supported.
     - residue: Provides the residue bytes of the transfer for those that
       support residue.
 
-- ``device_prep_peripheral_dma_vec``
-
-  - Similar to ``device_prep_slave_sg``, but it takes a pointer to a
-    array of ``dma_vec`` structures, which (in the long run) will replace
-    scatterlists.
-
 - ``device_issue_pending``
 
   - Takes the first transaction descriptor in the pending queue,
@@ -549,10 +553,6 @@ dma_cookie_t
 
 - Not really relevant any more since the introduction of ``virt-dma``
   that abstracts it away.
-
-dma_vec
-
-- A small structure that contains a DMA address and length.
 
 DMA_CTRL_ACK
 

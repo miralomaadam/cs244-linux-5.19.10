@@ -194,7 +194,7 @@ qla2x00_mailbox_command(scsi_qla_host_t *vha, mbx_cmd_t *mcp)
 	if (ha->flags.purge_mbox || chip_reset != ha->chip_reset ||
 	    ha->flags.eeh_busy) {
 		ql_log(ql_log_warn, vha, 0xd035,
-		       "Purge mbox: purge[%d] eeh[%d] cmd=0x%x, Exiting.\n",
+		       "Error detected: purge[%d] eeh[%d] cmd=0x%x, Exiting.\n",
 		       ha->flags.purge_mbox, ha->flags.eeh_busy, mcp->mb[0]);
 		rval = QLA_ABORTED;
 		goto premature_exit;
@@ -273,6 +273,7 @@ qla2x00_mailbox_command(scsi_qla_host_t *vha, mbx_cmd_t *mcp)
 		spin_unlock_irqrestore(&ha->hardware_lock, flags);
 
 		wait_time = jiffies;
+		atomic_inc(&ha->num_pend_mbx_stage3);
 		if (!wait_for_completion_timeout(&ha->mbx_intr_comp,
 		    mcp->tov * HZ)) {
 			ql_dbg(ql_dbg_mbx, vha, 0x117a,
@@ -289,6 +290,7 @@ qla2x00_mailbox_command(scsi_qla_host_t *vha, mbx_cmd_t *mcp)
 				spin_unlock_irqrestore(&ha->hardware_lock,
 				    flags);
 				atomic_dec(&ha->num_pend_mbx_stage2);
+				atomic_dec(&ha->num_pend_mbx_stage3);
 				rval = QLA_ABORTED;
 				goto premature_exit;
 			}
@@ -300,9 +302,11 @@ qla2x00_mailbox_command(scsi_qla_host_t *vha, mbx_cmd_t *mcp)
 			ha->flags.mbox_busy = 0;
 			spin_unlock_irqrestore(&ha->hardware_lock, flags);
 			atomic_dec(&ha->num_pend_mbx_stage2);
+			atomic_dec(&ha->num_pend_mbx_stage3);
 			rval = QLA_ABORTED;
 			goto premature_exit;
 		}
+		atomic_dec(&ha->num_pend_mbx_stage3);
 
 		if (time_after(jiffies, wait_time + 5 * HZ))
 			ql_log(ql_log_warn, vha, 0x1015, "cmd=0x%x, waited %d msecs\n",
@@ -2209,9 +2213,6 @@ qla2x00_get_firmware_state(scsi_qla_host_t *vha, uint16_t *states)
 	ql_dbg(ql_dbg_mbx + ql_dbg_verbose, vha, 0x1054,
 	    "Entered %s.\n", __func__);
 
-	if (!ha->flags.fw_started)
-		return QLA_FUNCTION_FAILED;
-
 	mcp->mb[0] = MBC_GET_FIRMWARE_STATE;
 	mcp->out_mb = MBX_0;
 	if (IS_FWI2_CAPABLE(vha->hw))
@@ -4009,7 +4010,7 @@ qla24xx_report_id_acquisition(scsi_qla_host_t *vha,
 		    rptid_entry->port_id[2], rptid_entry->port_id[1],
 		    rptid_entry->port_id[0]);
 		ha->current_topology = ISP_CFG_NL;
-		qla_update_host_map(vha, id);
+		qlt_update_host_map(vha, id);
 
 	} else if (rptid_entry->format == 1) {
 		/* fabric */
@@ -4125,7 +4126,7 @@ qla24xx_report_id_acquisition(scsi_qla_host_t *vha,
 					    WWN_SIZE);
 				}
 
-				qla_update_host_map(vha, id);
+				qlt_update_host_map(vha, id);
 			}
 
 			set_bit(REGISTER_FC4_NEEDED, &vha->dpc_flags);
@@ -4152,7 +4153,7 @@ qla24xx_report_id_acquisition(scsi_qla_host_t *vha,
 			if (!found)
 				return;
 
-			qla_update_host_map(vp, id);
+			qlt_update_host_map(vp, id);
 
 			/*
 			 * Cannot configure here as we are still sitting on the
@@ -4183,7 +4184,7 @@ qla24xx_report_id_acquisition(scsi_qla_host_t *vha,
 
 		ha->flags.n2n_ae = 1;
 		spin_lock_irqsave(&ha->vport_slock, flags);
-		qla_update_vp_map(vha, SET_AL_PA);
+		qlt_update_vp_map(vha, SET_AL_PA);
 		spin_unlock_irqrestore(&ha->vport_slock, flags);
 
 		list_for_each_entry(fcport, &vha->vp_fcports, list) {
@@ -6471,54 +6472,6 @@ qla26xx_dport_diagnostics(scsi_qla_host_t *vha,
 
 	dma_unmap_single(&vha->hw->pdev->dev, dd_dma,
 	    size, DMA_FROM_DEVICE);
-
-	return rval;
-}
-
-int
-qla26xx_dport_diagnostics_v2(scsi_qla_host_t *vha,
-			     struct qla_dport_diag_v2 *dd,  mbx_cmd_t *mcp)
-{
-	int rval;
-	dma_addr_t dd_dma;
-	uint size = sizeof(dd->buf);
-	uint16_t options = dd->options;
-
-	ql_dbg(ql_dbg_mbx + ql_dbg_verbose, vha, 0x119f,
-	       "Entered %s.\n", __func__);
-
-	dd_dma = dma_map_single(&vha->hw->pdev->dev,
-				dd->buf, size, DMA_FROM_DEVICE);
-	if (dma_mapping_error(&vha->hw->pdev->dev, dd_dma)) {
-		ql_log(ql_log_warn, vha, 0x1194,
-		       "Failed to map dma buffer.\n");
-		return QLA_MEMORY_ALLOC_FAILED;
-	}
-
-	memset(dd->buf, 0, size);
-
-	mcp->mb[0] = MBC_DPORT_DIAGNOSTICS;
-	mcp->mb[1] = options;
-	mcp->mb[2] = MSW(LSD(dd_dma));
-	mcp->mb[3] = LSW(LSD(dd_dma));
-	mcp->mb[6] = MSW(MSD(dd_dma));
-	mcp->mb[7] = LSW(MSD(dd_dma));
-	mcp->mb[8] = size;
-	mcp->out_mb = MBX_8 | MBX_7 | MBX_6 | MBX_3 | MBX_2 | MBX_1 | MBX_0;
-	mcp->in_mb = MBX_3 | MBX_2 | MBX_1 | MBX_0;
-	mcp->buf_size = size;
-	mcp->flags = MBX_DMA_IN;
-	mcp->tov = MBX_TOV_SECONDS * 4;
-	rval = qla2x00_mailbox_command(vha, mcp);
-
-	if (rval != QLA_SUCCESS) {
-		ql_dbg(ql_dbg_mbx, vha, 0x1195, "Failed=%x.\n", rval);
-	} else {
-		ql_dbg(ql_dbg_mbx + ql_dbg_verbose, vha, 0x1196,
-		       "Done %s.\n", __func__);
-	}
-
-	dma_unmap_single(&vha->hw->pdev->dev, dd_dma, size, DMA_FROM_DEVICE);
 
 	return rval;
 }

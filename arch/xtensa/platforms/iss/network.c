@@ -37,6 +37,10 @@
 #define ETH_HEADER_OTHER 14
 #define ISS_NET_TIMER_VALUE (HZ / 10)
 
+
+static DEFINE_SPINLOCK(devices_lock);
+static LIST_HEAD(devices);
+
 /* ------------------------------------------------------------------------- */
 
 /* We currently only support the TUNTAP transport protocol. */
@@ -66,6 +70,8 @@ struct iss_net_ops {
 /* This structure contains out private information for the driver. */
 
 struct iss_net_private {
+	struct list_head device_list;
+
 	spinlock_t lock;
 	struct net_device *dev;
 	struct platform_device pdev;
@@ -201,7 +207,7 @@ static int tuntap_write(struct iss_net_private *lp, struct sk_buff **skb)
 	return simc_write(lp->tp.info.tuntap.fd, (*skb)->data, (*skb)->len);
 }
 
-static unsigned short tuntap_protocol(struct sk_buff *skb)
+unsigned short tuntap_protocol(struct sk_buff *skb)
 {
 	return eth_type_trans(skb, skb->dev);
 }
@@ -237,7 +243,7 @@ static int tuntap_probe(struct iss_net_private *lp, int index, char *init)
 
 	init += sizeof(TRANSPORT_TUNTAP_NAME) - 1;
 	if (*init == ',') {
-		rem = split_if_spec(init + 1, &mac_str, &dev_name, NULL);
+		rem = split_if_spec(init + 1, &mac_str, &dev_name);
 		if (rem != NULL) {
 			pr_err("%s: extra garbage on specification : '%s'\n",
 			       dev->name, rem);
@@ -375,7 +381,7 @@ static int iss_net_close(struct net_device *dev)
 	struct iss_net_private *lp = netdev_priv(dev);
 
 	netif_stop_queue(dev);
-	timer_delete_sync(&lp->timer);
+	del_timer_sync(&lp->timer);
 	lp->tp.net_ops->close(lp);
 
 	return 0;
@@ -441,7 +447,7 @@ static int iss_net_change_mtu(struct net_device *dev, int new_mtu)
 	return -EINVAL;
 }
 
-static void iss_net_user_timer_expire(struct timer_list *unused)
+void iss_net_user_timer_expire(struct timer_list *unused)
 {
 }
 
@@ -490,6 +496,7 @@ static void iss_net_configure(int index, char *init)
 
 	lp = netdev_priv(dev);
 	*lp = (struct iss_net_private) {
+		.device_list		= LIST_HEAD_INIT(lp->device_list),
 		.dev			= dev,
 		.index			= index,
 	};
@@ -523,6 +530,10 @@ static void iss_net_configure(int index, char *init)
 		driver_registered = 1;
 	}
 
+	spin_lock(&devices_lock);
+	list_add(&lp->device_list, &devices);
+	spin_unlock(&devices_lock);
+
 	lp->pdev.id = index;
 	lp->pdev.name = DRIVER_NAME;
 	lp->pdev.dev.release = iss_net_pdev_release;
@@ -540,7 +551,6 @@ static void iss_net_configure(int index, char *init)
 		rtnl_unlock();
 		pr_err("%s: error registering net device!\n", dev->name);
 		platform_device_unregister(&lp->pdev);
-		/* dev is freed by the iss_net_pdev_release callback */
 		return;
 	}
 	rtnl_unlock();
@@ -572,7 +582,7 @@ struct iss_net_init {
 
 static int __init iss_net_setup(char *str)
 {
-	struct iss_net_init *device = NULL;
+	struct iss_net_private *device = NULL;
 	struct iss_net_init *new;
 	struct list_head *ele;
 	char *end;
@@ -593,11 +603,15 @@ static int __init iss_net_setup(char *str)
 	}
 	str = end;
 
-	list_for_each(ele, &eth_cmd_line) {
-		device = list_entry(ele, struct iss_net_init, list);
+	spin_lock(&devices_lock);
+
+	list_for_each(ele, &devices) {
+		device = list_entry(ele, struct iss_net_private, device_list);
 		if (device->index == n)
 			break;
 	}
+
+	spin_unlock(&devices_lock);
 
 	if (device && device->index == n) {
 		pr_err("Device %u already configured\n", n);

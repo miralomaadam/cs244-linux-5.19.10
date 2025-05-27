@@ -358,7 +358,7 @@ static void ppp_cp_event(struct net_device *dev, u16 pid, u16 event, u8 code,
 		}
 	}
 	if (old_state != CLOSED && proto->state == CLOSED)
-		timer_delete(&proto->timer);
+		del_timer(&proto->timer);
 
 #if DEBUG_STATE
 	printk(KERN_DEBUG "%s: %s ppp_cp_event(%s) ... %s\n", dev->name,

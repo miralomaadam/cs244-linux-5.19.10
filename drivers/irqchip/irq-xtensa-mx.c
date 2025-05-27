@@ -12,7 +12,6 @@
 #include <linux/irqdomain.h>
 #include <linux/irq.h>
 #include <linux/irqchip.h>
-#include <linux/irqchip/xtensa-mx.h>
 #include <linux/of.h>
 
 #include <asm/mxregs.h>
@@ -156,7 +155,7 @@ static void __init xtensa_mx_init_common(struct irq_domain *root_domain)
 {
 	unsigned int i;
 
-	irq_set_default_domain(root_domain);
+	irq_set_default_host(root_domain);
 	secondary_init_irq();
 
 	/* Initialize default IRQ routing to CPU 0 */

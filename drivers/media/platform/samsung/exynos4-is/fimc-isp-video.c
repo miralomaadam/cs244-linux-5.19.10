@@ -40,7 +40,7 @@ static int isp_video_capture_queue_setup(struct vb2_queue *vq,
 			unsigned int sizes[], struct device *alloc_devs[])
 {
 	struct fimc_isp *isp = vb2_get_drv_priv(vq);
-	const struct v4l2_pix_format_mplane *vid_fmt = &isp->video_capture.pixfmt;
+	struct v4l2_pix_format_mplane *vid_fmt = &isp->video_capture.pixfmt;
 	const struct fimc_fmt *fmt = isp->video_capture.format;
 	unsigned int wh, i;
 
@@ -255,6 +255,8 @@ static const struct vb2_ops isp_video_capture_qops = {
 	.queue_setup	 = isp_video_capture_queue_setup,
 	.buf_prepare	 = isp_video_capture_buffer_prepare,
 	.buf_queue	 = isp_video_capture_buffer_queue,
+	.wait_prepare	 = vb2_ops_wait_prepare,
+	.wait_finish	 = vb2_ops_wait_finish,
 	.start_streaming = isp_video_capture_start_streaming,
 	.stop_streaming	 = isp_video_capture_stop_streaming,
 };
@@ -310,7 +312,7 @@ static int isp_video_release(struct file *file)
 	is_singular_file = v4l2_fh_is_singular_file(file);
 
 	if (is_singular_file && ivc->streaming) {
-		video_device_pipeline_stop(&ivc->ve.vdev);
+		media_pipeline_stop(entity);
 		ivc->streaming = 0;
 	}
 
@@ -447,33 +449,29 @@ static int isp_video_s_fmt_mplane(struct file *file, void *priv,
 static int isp_video_pipeline_validate(struct fimc_isp *isp)
 {
 	struct v4l2_subdev *sd = &isp->subdev;
+	struct v4l2_subdev_format sink_fmt, src_fmt;
 	struct media_pad *pad;
 	int ret;
 
 	while (1) {
-		struct v4l2_subdev_format sink_fmt = {
-			.which = V4L2_SUBDEV_FORMAT_ACTIVE,
-		};
-		struct v4l2_subdev_format src_fmt = {
-			.which = V4L2_SUBDEV_FORMAT_ACTIVE,
-		};
-
 		/* Retrieve format at the sink pad */
 		pad = &sd->entity.pads[0];
 		if (!(pad->flags & MEDIA_PAD_FL_SINK))
 			break;
 		sink_fmt.pad = pad->index;
+		sink_fmt.which = V4L2_SUBDEV_FORMAT_ACTIVE;
 		ret = v4l2_subdev_call(sd, pad, get_fmt, NULL, &sink_fmt);
 		if (ret < 0 && ret != -ENOIOCTLCMD)
 			return -EPIPE;
 
 		/* Retrieve format at the source pad */
-		pad = media_pad_remote_pad_first(pad);
+		pad = media_entity_remote_pad(pad);
 		if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
 			break;
 
 		sd = media_entity_to_v4l2_subdev(pad->entity);
 		src_fmt.pad = pad->index;
+		src_fmt.which = V4L2_SUBDEV_FORMAT_ACTIVE;
 		ret = v4l2_subdev_call(sd, pad, get_fmt, NULL, &src_fmt);
 		if (ret < 0 && ret != -ENOIOCTLCMD)
 			return -EPIPE;
@@ -492,9 +490,10 @@ static int isp_video_streamon(struct file *file, void *priv,
 {
 	struct fimc_isp *isp = video_drvdata(file);
 	struct exynos_video_entity *ve = &isp->video_capture.ve;
+	struct media_entity *me = &ve->vdev.entity;
 	int ret;
 
-	ret = video_device_pipeline_start(&ve->vdev, &ve->pipe->mp);
+	ret = media_pipeline_start(me, &ve->pipe->mp);
 	if (ret < 0)
 		return ret;
 
@@ -509,7 +508,7 @@ static int isp_video_streamon(struct file *file, void *priv,
 	isp->video_capture.streaming = 1;
 	return 0;
 p_stop:
-	video_device_pipeline_stop(&ve->vdev);
+	media_pipeline_stop(me);
 	return ret;
 }
 
@@ -524,7 +523,7 @@ static int isp_video_streamoff(struct file *file, void *priv,
 	if (ret < 0)
 		return ret;
 
-	video_device_pipeline_stop(&video->ve.vdev);
+	media_pipeline_stop(&video->ve.vdev.entity);
 	video->streaming = 0;
 	return 0;
 }

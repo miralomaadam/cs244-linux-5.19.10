@@ -372,12 +372,16 @@ static long media_device_get_topology(struct media_device *mdev, void *arg)
 
 static long media_device_request_alloc(struct media_device *mdev, void *arg)
 {
+#ifdef CONFIG_MEDIA_CONTROLLER_REQUEST_API
 	int *alloc_fd = arg;
 
 	if (!mdev->ops || !mdev->ops->req_validate || !mdev->ops->req_queue)
 		return -ENOTTY;
 
 	return media_request_alloc(mdev, alloc_fd);
+#else
+	return -ENOTTY;
+#endif
 }
 
 static long copy_arg_from_user(void *karg, void __user *uarg, unsigned int cmd)
@@ -577,7 +581,7 @@ static void __media_device_unregister_entity(struct media_entity *entity)
 	struct media_device *mdev = entity->graph_obj.mdev;
 	struct media_link *link, *tmp;
 	struct media_interface *intf;
-	struct media_pad *iter;
+	unsigned int i;
 
 	ida_free(&mdev->entity_internal_idx, entity->internal_idx);
 
@@ -593,8 +597,8 @@ static void __media_device_unregister_entity(struct media_entity *entity)
 	__media_entity_remove_links(entity);
 
 	/* Remove all pads that belong to this entity */
-	media_entity_for_each_pad(entity, iter)
-		media_gobj_destroy(&iter->graph_obj);
+	for (i = 0; i < entity->num_pads; i++)
+		media_gobj_destroy(&entity->pads[i].graph_obj);
 
 	/* Remove the entity */
 	media_gobj_destroy(&entity->graph_obj);
@@ -606,7 +610,7 @@ int __must_check media_device_register_entity(struct media_device *mdev,
 					      struct media_entity *entity)
 {
 	struct media_entity_notify *notify, *next;
-	struct media_pad *iter;
+	unsigned int i;
 	int ret;
 
 	if (entity->function == MEDIA_ENT_F_V4L2_SUBDEV_UNKNOWN ||
@@ -635,8 +639,9 @@ int __must_check media_device_register_entity(struct media_device *mdev,
 	media_gobj_create(mdev, MEDIA_GRAPH_ENTITY, &entity->graph_obj);
 
 	/* Initialize objects at the pads */
-	media_entity_for_each_pad(entity, iter)
-		media_gobj_create(mdev, MEDIA_GRAPH_PAD, &iter->graph_obj);
+	for (i = 0; i < entity->num_pads; i++)
+		media_gobj_create(mdev, MEDIA_GRAPH_PAD,
+			       &entity->pads[i].graph_obj);
 
 	/* invoke entity_notify callbacks */
 	list_for_each_entry_safe(notify, next, &mdev->entity_notify, list)
@@ -752,12 +757,13 @@ int __must_check __media_device_register(struct media_device *mdev,
 }
 EXPORT_SYMBOL_GPL(__media_device_register);
 
-void media_device_register_entity_notify(struct media_device *mdev,
+int __must_check media_device_register_entity_notify(struct media_device *mdev,
 					struct media_entity_notify *nptr)
 {
 	mutex_lock(&mdev->graph_mutex);
 	list_add_tail(&nptr->list, &mdev->entity_notify);
 	mutex_unlock(&mdev->graph_mutex);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(media_device_register_entity_notify);
 

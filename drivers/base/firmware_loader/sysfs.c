@@ -25,7 +25,7 @@ void __fw_load_abort(struct fw_priv *fw_priv)
 }
 
 #ifdef CONFIG_FW_LOADER_USER_HELPER
-static ssize_t timeout_show(const struct class *class, const struct class_attribute *attr,
+static ssize_t timeout_show(struct class *class, struct class_attribute *attr,
 			    char *buf)
 {
 	return sysfs_emit(buf, "%d\n", __firmware_loading_timeout());
@@ -44,7 +44,7 @@ static ssize_t timeout_show(const struct class *class, const struct class_attrib
  *
  *	Note: zero means 'wait forever'.
  **/
-static ssize_t timeout_store(const struct class *class, const struct class_attribute *attr,
+static ssize_t timeout_store(struct class *class, struct class_attribute *attr,
 			     const char *buf, size_t count)
 {
 	int tmp_loading_timeout = simple_strtol(buf, NULL, 10);
@@ -64,7 +64,7 @@ static struct attribute *firmware_class_attrs[] = {
 };
 ATTRIBUTE_GROUPS(firmware_class);
 
-static int do_firmware_uevent(const struct fw_sysfs *fw_sysfs, struct kobj_uevent_env *env)
+static int do_firmware_uevent(struct fw_sysfs *fw_sysfs, struct kobj_uevent_env *env)
 {
 	if (add_uevent_var(env, "FIRMWARE=%s", fw_sysfs->fw_priv->fw_name))
 		return -ENOMEM;
@@ -76,9 +76,9 @@ static int do_firmware_uevent(const struct fw_sysfs *fw_sysfs, struct kobj_ueven
 	return 0;
 }
 
-static int firmware_uevent(const struct device *dev, struct kobj_uevent_env *env)
+static int firmware_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
-	const struct fw_sysfs *fw_sysfs = to_fw_sysfs(dev);
+	struct fw_sysfs *fw_sysfs = to_fw_sysfs(dev);
 	int err = 0;
 
 	mutex_lock(&fw_lock);
@@ -241,17 +241,19 @@ static void firmware_rw(struct fw_priv *fw_priv, char *buffer,
 			loff_t offset, size_t count, bool read)
 {
 	while (count) {
+		void *page_data;
 		int page_nr = offset >> PAGE_SHIFT;
 		int page_ofs = offset & (PAGE_SIZE - 1);
 		int page_cnt = min_t(size_t, PAGE_SIZE - page_ofs, count);
 
-		if (read)
-			memcpy_from_page(buffer, fw_priv->pages[page_nr],
-					 page_ofs, page_cnt);
-		else
-			memcpy_to_page(fw_priv->pages[page_nr], page_ofs,
-				       buffer, page_cnt);
+		page_data = kmap(fw_priv->pages[page_nr]);
 
+		if (read)
+			memcpy(buffer, page_data + page_ofs, page_cnt);
+		else
+			memcpy(page_data + page_ofs, buffer, page_cnt);
+
+		kunmap(fw_priv->pages[page_nr]);
 		buffer += page_cnt;
 		offset += page_cnt;
 		count -= page_cnt;
@@ -259,7 +261,7 @@ static void firmware_rw(struct fw_priv *fw_priv, char *buffer,
 }
 
 static ssize_t firmware_data_read(struct file *filp, struct kobject *kobj,
-				  const struct bin_attribute *bin_attr,
+				  struct bin_attribute *bin_attr,
 				  char *buffer, loff_t offset, size_t count)
 {
 	struct device *dev = kobj_to_dev(kobj);
@@ -316,7 +318,7 @@ static int fw_realloc_pages(struct fw_sysfs *fw_sysfs, int min_size)
  *	the driver as a firmware image.
  **/
 static ssize_t firmware_data_write(struct file *filp, struct kobject *kobj,
-				   const struct bin_attribute *bin_attr,
+				   struct bin_attribute *bin_attr,
 				   char *buffer, loff_t offset, size_t count)
 {
 	struct device *dev = kobj_to_dev(kobj);
@@ -356,11 +358,11 @@ out:
 	return retval;
 }
 
-static const struct bin_attribute firmware_attr_data = {
+static struct bin_attribute firmware_attr_data = {
 	.attr = { .name = "data", .mode = 0644 },
 	.size = 0,
-	.read_new = firmware_data_read,
-	.write_new = firmware_data_write,
+	.read = firmware_data_read,
+	.write = firmware_data_write,
 };
 
 static struct attribute *fw_dev_attrs[] = {
@@ -374,14 +376,14 @@ static struct attribute *fw_dev_attrs[] = {
 	NULL
 };
 
-static const struct bin_attribute *const fw_dev_bin_attrs[] = {
+static struct bin_attribute *fw_dev_bin_attrs[] = {
 	&firmware_attr_data,
 	NULL
 };
 
 static const struct attribute_group fw_dev_attr_group = {
 	.attrs = fw_dev_attrs,
-	.bin_attrs_new = fw_dev_bin_attrs,
+	.bin_attrs = fw_dev_bin_attrs,
 #ifdef CONFIG_FW_UPLOAD
 	.is_visible = fw_upload_is_visible,
 #endif

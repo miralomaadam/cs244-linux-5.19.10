@@ -14,9 +14,7 @@ KVM
    s390/index
    ppc-pv
    x86/index
-   loongarch/index
 
    locking
    vcpu-requests
-   halt-polling
    review-checklist

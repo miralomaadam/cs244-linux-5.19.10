@@ -8,7 +8,7 @@
 /* Power-Management-Code ( CONFIG_PM )
  * for ens1371 only ( FIXME )
  * derived from cs4281.c, atiixp.c and via82xx.c
- * using https://www.kernel.org/doc/html/latest/sound/kernel-api/writing-an-alsa-driver.html
+ * using http://www.alsa-project.org/~tiwai/writing-an-alsa-driver/ 
  * by Kurt J. Bosch
  */
 
@@ -1850,12 +1850,12 @@ static void snd_ensoniq_proc_read(struct snd_info_entry *entry,
 
 	snd_iprintf(buffer, "Ensoniq AudioPCI " CHIP_NAME "\n\n");
 	snd_iprintf(buffer, "Joystick enable  : %s\n",
-		    str_on_off(ensoniq->ctrl & ES_JYSTK_EN));
+		    ensoniq->ctrl & ES_JYSTK_EN ? "on" : "off");
 #ifdef CHIP1370
 	snd_iprintf(buffer, "MIC +5V bias     : %s\n",
-		    str_on_off(ensoniq->ctrl & ES_1370_XCTL1));
+		    ensoniq->ctrl & ES_1370_XCTL1 ? "on" : "off");
 	snd_iprintf(buffer, "Line In to AOUT  : %s\n",
-		    str_on_off(ensoniq->ctrl & ES_1370_XCTL0));
+		    ensoniq->ctrl & ES_1370_XCTL0 ? "on" : "off");
 #else
 	snd_iprintf(buffer, "Joystick port    : 0x%x\n",
 		    (ES_1371_JOY_ASELI(ensoniq->ctrl) * 8) + 0x200);
@@ -1968,6 +1968,7 @@ static void snd_ensoniq_chip_init(struct ensoniq *ensoniq)
 	outl(ensoniq->cssr, ES_REG(ensoniq, STATUS));
 }
 
+#ifdef CONFIG_PM_SLEEP
 static int snd_ensoniq_suspend(struct device *dev)
 {
 	struct snd_card *card = dev_get_drvdata(dev);
@@ -2006,7 +2007,11 @@ static int snd_ensoniq_resume(struct device *dev)
 	return 0;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(snd_ensoniq_pm, snd_ensoniq_suspend, snd_ensoniq_resume);
+static SIMPLE_DEV_PM_OPS(snd_ensoniq_pm, snd_ensoniq_suspend, snd_ensoniq_resume);
+#define SND_ENSONIQ_PM_OPS	&snd_ensoniq_pm
+#else
+#define SND_ENSONIQ_PM_OPS	NULL
+#endif /* CONFIG_PM_SLEEP */
 
 static int snd_ensoniq_create(struct snd_card *card,
 			      struct pci_dev *pci)
@@ -2375,7 +2380,7 @@ static struct pci_driver ens137x_driver = {
 	.id_table = snd_audiopci_ids,
 	.probe = snd_audiopci_probe,
 	.driver = {
-		.pm = &snd_ensoniq_pm,
+		.pm = SND_ENSONIQ_PM_OPS,
 	},
 };
 	

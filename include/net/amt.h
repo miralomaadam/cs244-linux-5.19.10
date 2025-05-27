@@ -7,9 +7,6 @@
 
 #include <linux/siphash.h>
 #include <linux/jhash.h>
-#include <linux/netdevice.h>
-#include <net/gro_cells.h>
-#include <net/rtnetlink.h>
 
 enum amt_msg_type {
 	AMT_MSG_DISCOVERY = 1,

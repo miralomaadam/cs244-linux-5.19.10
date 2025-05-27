@@ -12,7 +12,7 @@
 
 #include <linux/module.h>
 #include <linux/mutex.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/reset.h>
@@ -76,54 +76,6 @@ static const struct rcar_isp_format rcar_isp_formats[] = {
 		.code = MEDIA_BUS_FMT_YUYV10_2X10,
 		.datatype = MIPI_CSI2_DT_YUV422_8B,
 		.procmode = 0x0c,
-	}, {
-		.code = MEDIA_BUS_FMT_SBGGR8_1X8,
-		.datatype = MIPI_CSI2_DT_RAW8,
-		.procmode = 0x00,
-	}, {
-		.code = MEDIA_BUS_FMT_SGBRG8_1X8,
-		.datatype = MIPI_CSI2_DT_RAW8,
-		.procmode = 0x00,
-	}, {
-		.code = MEDIA_BUS_FMT_SGRBG8_1X8,
-		.datatype = MIPI_CSI2_DT_RAW8,
-		.procmode = 0x00,
-	}, {
-		.code = MEDIA_BUS_FMT_SRGGB8_1X8,
-		.datatype = MIPI_CSI2_DT_RAW8,
-		.procmode = 0x00,
-	}, {
-		.code = MEDIA_BUS_FMT_SBGGR10_1X10,
-		.datatype = MIPI_CSI2_DT_RAW10,
-		.procmode = 0x01,
-	}, {
-		.code = MEDIA_BUS_FMT_SGBRG10_1X10,
-		.datatype = MIPI_CSI2_DT_RAW10,
-		.procmode = 0x01,
-	}, {
-		.code = MEDIA_BUS_FMT_SGRBG10_1X10,
-		.datatype = MIPI_CSI2_DT_RAW10,
-		.procmode = 0x01,
-	}, {
-		.code = MEDIA_BUS_FMT_SRGGB10_1X10,
-		.datatype = MIPI_CSI2_DT_RAW10,
-		.procmode = 0x01,
-	}, {
-		.code = MEDIA_BUS_FMT_SBGGR12_1X12,
-		.datatype = MIPI_CSI2_DT_RAW12,
-		.procmode = 0x02,
-	}, {
-		.code = MEDIA_BUS_FMT_SGBRG12_1X12,
-		.datatype = MIPI_CSI2_DT_RAW12,
-		.procmode = 0x02,
-	}, {
-		.code = MEDIA_BUS_FMT_SGRBG12_1X12,
-		.datatype = MIPI_CSI2_DT_RAW12,
-		.procmode = 0x02,
-	}, {
-		.code = MEDIA_BUS_FMT_SRGGB12_1X12,
-		.datatype = MIPI_CSI2_DT_RAW12,
-		.procmode = 0x02,
 	},
 };
 
@@ -169,8 +121,9 @@ struct rcar_isp {
 
 	struct v4l2_async_notifier notifier;
 	struct v4l2_subdev *remote;
-	unsigned int remote_pad;
 
+	struct mutex lock; /* Protects mf and stream_count. */
+	struct v4l2_mbus_framefmt mf;
 	int stream_count;
 };
 
@@ -217,19 +170,14 @@ static void risp_power_off(struct rcar_isp *isp)
 	pm_runtime_put(isp->dev);
 }
 
-static int risp_start(struct rcar_isp *isp, struct v4l2_subdev_state *state)
+static int risp_start(struct rcar_isp *isp)
 {
-	const struct v4l2_mbus_framefmt *fmt;
 	const struct rcar_isp_format *format;
 	unsigned int vc;
 	u32 sel_csi = 0;
 	int ret;
 
-	fmt = v4l2_subdev_state_get_format(state, RCAR_ISP_SINK);
-	if (!fmt)
-		return -EINVAL;
-
-	format = risp_code_to_fmt(fmt->code);
+	format = risp_code_to_fmt(isp->mf.code);
 	if (!format) {
 		dev_err(isp->dev, "Unsupported bus format\n");
 		return -EINVAL;
@@ -271,8 +219,7 @@ static int risp_start(struct rcar_isp *isp, struct v4l2_subdev_state *state)
 	/* Start ISP. */
 	risp_write(isp, ISPSTART_REG, ISPSTART_START);
 
-	ret = v4l2_subdev_enable_streams(isp->remote, isp->remote_pad,
-					 BIT_ULL(0));
+	ret = v4l2_subdev_call(isp->remote, video, s_stream, 1);
 	if (ret)
 		risp_power_off(isp);
 
@@ -281,7 +228,7 @@ static int risp_start(struct rcar_isp *isp, struct v4l2_subdev_state *state)
 
 static void risp_stop(struct rcar_isp *isp)
 {
-	v4l2_subdev_disable_streams(isp->remote, isp->remote_pad, BIT_ULL(0));
+	v4l2_subdev_call(isp->remote, video, s_stream, 0);
 
 	/* Stop ISP. */
 	risp_write(isp, ISPSTART_REG, ISPSTART_STOP);
@@ -289,79 +236,87 @@ static void risp_stop(struct rcar_isp *isp)
 	risp_power_off(isp);
 }
 
-static int risp_enable_streams(struct v4l2_subdev *sd,
-			       struct v4l2_subdev_state *state, u32 source_pad,
-			       u64 source_streams_mask)
+static int risp_s_stream(struct v4l2_subdev *sd, int enable)
 {
 	struct rcar_isp *isp = sd_to_isp(sd);
 	int ret = 0;
 
-	if (source_streams_mask != 1)
-		return -EINVAL;
+	mutex_lock(&isp->lock);
 
-	if (!isp->remote)
-		return -ENODEV;
-
-	if (isp->stream_count == 0) {
-		ret = risp_start(isp, state);
-		if (ret)
-			return ret;
+	if (!isp->remote) {
+		ret = -ENODEV;
+		goto out;
 	}
 
-	isp->stream_count += 1;
+	if (enable && isp->stream_count == 0) {
+		ret = risp_start(isp);
+		if (ret)
+			goto out;
+	} else if (!enable && isp->stream_count == 1) {
+		risp_stop(isp);
+	}
+
+	isp->stream_count += enable ? 1 : -1;
+out:
+	mutex_unlock(&isp->lock);
 
 	return ret;
 }
 
-static int risp_disable_streams(struct v4l2_subdev *sd,
-				struct v4l2_subdev_state *state, u32 source_pad,
-				u64 source_streams_mask)
-{
-	struct rcar_isp *isp = sd_to_isp(sd);
-
-	if (source_streams_mask != 1)
-		return -EINVAL;
-
-	if (!isp->remote)
-		return -ENODEV;
-
-	if (isp->stream_count == 1)
-		risp_stop(isp);
-
-	isp->stream_count -= 1;
-
-	return 0;
-}
+static const struct v4l2_subdev_video_ops risp_video_ops = {
+	.s_stream = risp_s_stream,
+};
 
 static int risp_set_pad_format(struct v4l2_subdev *sd,
-			       struct v4l2_subdev_state *state,
+			       struct v4l2_subdev_state *sd_state,
 			       struct v4l2_subdev_format *format)
 {
+	struct rcar_isp *isp = sd_to_isp(sd);
 	struct v4l2_mbus_framefmt *framefmt;
 
-	if (format->pad > RCAR_ISP_SINK)
-		return v4l2_subdev_get_fmt(sd, state, format);
+	mutex_lock(&isp->lock);
 
 	if (!risp_code_to_fmt(format->format.code))
 		format->format.code = rcar_isp_formats[0].code;
 
-	for (unsigned int i = 0; i < RCAR_ISP_NUM_PADS; i++) {
-		framefmt = v4l2_subdev_state_get_format(state, i);
+	if (format->which == V4L2_SUBDEV_FORMAT_ACTIVE) {
+		isp->mf = format->format;
+	} else {
+		framefmt = v4l2_subdev_get_try_format(sd, sd_state, 0);
 		*framefmt = format->format;
 	}
+
+	mutex_unlock(&isp->lock);
+
+	return 0;
+}
+
+static int risp_get_pad_format(struct v4l2_subdev *sd,
+			       struct v4l2_subdev_state *sd_state,
+			       struct v4l2_subdev_format *format)
+{
+	struct rcar_isp *isp = sd_to_isp(sd);
+
+	mutex_lock(&isp->lock);
+
+	if (format->which == V4L2_SUBDEV_FORMAT_ACTIVE)
+		format->format = isp->mf;
+	else
+		format->format = *v4l2_subdev_get_try_format(sd, sd_state, 0);
+
+	mutex_unlock(&isp->lock);
 
 	return 0;
 }
 
 static const struct v4l2_subdev_pad_ops risp_pad_ops = {
-	.enable_streams = risp_enable_streams,
-	.disable_streams = risp_disable_streams,
 	.set_fmt = risp_set_pad_format,
-	.get_fmt = v4l2_subdev_get_fmt,
+	.get_fmt = risp_get_pad_format,
 	.link_validate = v4l2_subdev_link_validate_default,
 };
 
 static const struct v4l2_subdev_ops rcar_isp_subdev_ops = {
+	.video	= &risp_video_ops,
 	.pad	= &risp_pad_ops,
 };
 
@@ -371,7 +326,7 @@ static const struct v4l2_subdev_ops rcar_isp_subdev_ops = {
 
 static int risp_notify_bound(struct v4l2_async_notifier *notifier,
 			     struct v4l2_subdev *subdev,
-			     struct v4l2_async_connection *asd)
+			     struct v4l2_async_subdev *asd)
 {
 	struct rcar_isp *isp = notifier_to_isp(notifier);
 	int pad;
@@ -384,7 +339,6 @@ static int risp_notify_bound(struct v4l2_async_notifier *notifier,
 	}
 
 	isp->remote = subdev;
-	isp->remote_pad = pad;
 
 	dev_dbg(isp->dev, "Bound %s pad: %d\n", subdev->name, pad);
 
@@ -396,7 +350,7 @@ static int risp_notify_bound(struct v4l2_async_notifier *notifier,
 
 static void risp_notify_unbind(struct v4l2_async_notifier *notifier,
 			       struct v4l2_subdev *subdev,
-			       struct v4l2_async_connection *asd)
+			       struct v4l2_async_subdev *asd)
 {
 	struct rcar_isp *isp = notifier_to_isp(notifier);
 
@@ -412,7 +366,7 @@ static const struct v4l2_async_notifier_operations risp_notify_ops = {
 
 static int risp_parse_dt(struct rcar_isp *isp)
 {
-	struct v4l2_async_connection *asd;
+	struct v4l2_async_subdev *asd;
 	struct fwnode_handle *fwnode;
 	struct fwnode_handle *ep;
 	unsigned int id;
@@ -438,16 +392,16 @@ static int risp_parse_dt(struct rcar_isp *isp)
 
 	dev_dbg(isp->dev, "Found '%pOF'\n", to_of_node(fwnode));
 
-	v4l2_async_subdev_nf_init(&isp->notifier, &isp->subdev);
+	v4l2_async_nf_init(&isp->notifier);
 	isp->notifier.ops = &risp_notify_ops;
 
 	asd = v4l2_async_nf_add_fwnode(&isp->notifier, fwnode,
-				       struct v4l2_async_connection);
+				       struct v4l2_async_subdev);
 	fwnode_handle_put(fwnode);
 	if (IS_ERR(asd))
 		return PTR_ERR(asd);
 
-	ret = v4l2_async_nf_register(&isp->notifier);
+	ret = v4l2_async_subdev_nf_register(&isp->subdev, &isp->notifier);
 	if (ret)
 		v4l2_async_nf_cleanup(&isp->notifier);
 
@@ -465,7 +419,10 @@ static const struct media_entity_operations risp_entity_ops = {
 static int risp_probe_resources(struct rcar_isp *isp,
 				struct platform_device *pdev)
 {
-	isp->base = devm_platform_get_and_ioremap_resource(pdev, 0, NULL);
+	struct resource *res;
+
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	isp->base = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(isp->base))
 		return PTR_ERR(isp->base);
 
@@ -476,10 +433,7 @@ static int risp_probe_resources(struct rcar_isp *isp,
 
 static const struct of_device_id risp_of_id_table[] = {
 	{ .compatible = "renesas,r8a779a0-isp" },
-	{ .compatible = "renesas,r8a779g0-isp" },
-	/* Keep above for compatibility with old DTB files. */
-	{ .compatible = "renesas,rcar-gen4-isp" },
-	{ /* sentinel */ }
+	{ /* sentinel */ },
 };
 MODULE_DEVICE_TABLE(of, risp_of_id_table);
 
@@ -495,10 +449,12 @@ static int risp_probe(struct platform_device *pdev)
 
 	isp->dev = &pdev->dev;
 
+	mutex_init(&isp->lock);
+
 	ret = risp_probe_resources(isp, pdev);
 	if (ret) {
 		dev_err(isp->dev, "Failed to get resources\n");
-		return ret;
+		goto error_mutex;
 	}
 
 	platform_set_drvdata(pdev, isp);
@@ -513,7 +469,7 @@ static int risp_probe(struct platform_device *pdev)
 	isp->subdev.dev = &pdev->dev;
 	v4l2_subdev_init(&isp->subdev, &rcar_isp_subdev_ops);
 	v4l2_set_subdevdata(&isp->subdev, &pdev->dev);
-	snprintf(isp->subdev.name, sizeof(isp->subdev.name), "%s %s",
+	snprintf(isp->subdev.name, V4L2_SUBDEV_NAME_SIZE, "%s %s",
 		 KBUILD_MODNAME, dev_name(&pdev->dev));
 	isp->subdev.flags = V4L2_SUBDEV_FL_HAS_DEVNODE;
 
@@ -529,30 +485,25 @@ static int risp_probe(struct platform_device *pdev)
 	if (ret)
 		goto error_notifier;
 
-	ret = v4l2_subdev_init_finalize(&isp->subdev);
-	if (ret)
-		goto error_notifier;
-
 	ret = v4l2_async_register_subdev(&isp->subdev);
 	if (ret < 0)
-		goto error_subdev;
+		goto error_notifier;
 
 	dev_info(isp->dev, "Using CSI-2 input: %u\n", isp->csi_input);
 
 	return 0;
-
-error_subdev:
-	v4l2_subdev_cleanup(&isp->subdev);
 error_notifier:
 	v4l2_async_nf_unregister(&isp->notifier);
 	v4l2_async_nf_cleanup(&isp->notifier);
 error_pm:
 	pm_runtime_disable(&pdev->dev);
+error_mutex:
+	mutex_destroy(&isp->lock);
 
 	return ret;
 }
 
-static void risp_remove(struct platform_device *pdev)
+static int risp_remove(struct platform_device *pdev)
 {
 	struct rcar_isp *isp = platform_get_drvdata(pdev);
 
@@ -560,15 +511,17 @@ static void risp_remove(struct platform_device *pdev)
 	v4l2_async_nf_cleanup(&isp->notifier);
 
 	v4l2_async_unregister_subdev(&isp->subdev);
-	v4l2_subdev_cleanup(&isp->subdev);
 
 	pm_runtime_disable(&pdev->dev);
+
+	mutex_destroy(&isp->lock);
+
+	return 0;
 }
 
 static struct platform_driver rcar_isp_driver = {
 	.driver = {
 		.name = "rcar-isp",
-		.suppress_bind_attrs = true,
 		.of_match_table = risp_of_id_table,
 	},
 	.probe = risp_probe,

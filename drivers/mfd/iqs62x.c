@@ -27,11 +27,11 @@
 #include <linux/mfd/iqs62x.h>
 #include <linux/module.h>
 #include <linux/notifier.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 
 #define IQS62X_PROD_NUM				0x00
 
@@ -96,7 +96,7 @@ struct iqs62x_fw_blk {
 	u8 addr;
 	u8 mask;
 	u8 len;
-	u8 data[] __counted_by(len);
+	u8 data[];
 };
 
 struct iqs62x_info {
@@ -1008,11 +1008,13 @@ static int iqs62x_probe(struct i2c_client *client)
 	return ret;
 }
 
-static void iqs62x_remove(struct i2c_client *client)
+static int iqs62x_remove(struct i2c_client *client)
 {
 	struct iqs62x_core *iqs62x = i2c_get_clientdata(client);
 
 	wait_for_completion(&iqs62x->fw_done);
+
+	return 0;
 }
 
 static int __maybe_unused iqs62x_suspend(struct device *dev)
@@ -1069,7 +1071,7 @@ static struct i2c_driver iqs62x_i2c_driver = {
 		.of_match_table = iqs62x_of_match,
 		.pm = &iqs62x_pm,
 	},
-	.probe = iqs62x_probe,
+	.probe_new = iqs62x_probe,
 	.remove = iqs62x_remove,
 };
 module_i2c_driver(iqs62x_i2c_driver);

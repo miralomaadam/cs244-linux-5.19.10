@@ -40,6 +40,8 @@ properties:
   reg:
     maxItems: 1
 
+  spi-max-frequency: true
+
   ti,enable-gpios:
     minItems: 1
     maxItems: 2
@@ -63,17 +65,14 @@ required:
   - ti,enable-gpios
   - vin-supply
 
-allOf:
-  - $ref: /schemas/spi/spi-peripheral-props.yaml#
-
-unevaluatedProperties: false
+additionalProperties: false
 
 examples:
   - |
     #include <dt-bindings/gpio/gpio.h>
     #include <dt-bindings/interrupt-controller/irq.h>
 
-    spi {
+    i2c {
         #address-cells = <1>;
         #size-cells = <0>;
 

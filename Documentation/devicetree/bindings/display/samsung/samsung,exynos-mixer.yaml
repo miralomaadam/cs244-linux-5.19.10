@@ -8,6 +8,7 @@ title: Samsung Exynos SoC Mixer
 
 maintainers:
   - Inki Dae <inki.dae@samsung.com>
+  - Joonyoung Shim <jy0922.shim@samsung.com>
   - Seung-Woo Kim <sw0312.kim@samsung.com>
   - Kyungmin Park <kyungmin.park@samsung.com>
   - Krzysztof Kozlowski <krzk@kernel.org>
@@ -85,7 +86,7 @@ allOf:
         clocks:
           minItems: 6
           maxItems: 6
-        reg:
+        regs:
           minItems: 2
           maxItems: 2
 
@@ -99,7 +100,7 @@ allOf:
         clocks:
           minItems: 4
           maxItems: 4
-        reg:
+        regs:
           minItems: 2
           maxItems: 2
 
@@ -116,7 +117,7 @@ allOf:
         clocks:
           minItems: 3
           maxItems: 3
-        reg:
+        regs:
           minItems: 1
           maxItems: 1
 

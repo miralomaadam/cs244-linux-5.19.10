@@ -17,6 +17,7 @@
 #include <linux/ethtool.h>
 #include <linux/topology.h>
 #include <linux/gfp.h>
+#include <linux/aer.h>
 #include <linux/interrupt.h>
 #include "net_driver.h"
 #include "efx.h"
@@ -1886,6 +1887,14 @@ unsigned int ef4_usecs_to_ticks(struct ef4_nic *efx, unsigned int usecs)
 	return usecs * 1000 / efx->timer_quantum_ns;
 }
 
+unsigned int ef4_ticks_to_usecs(struct ef4_nic *efx, unsigned int ticks)
+{
+	/* We must round up when converting ticks to microseconds
+	 * because we round down when converting the other way.
+	 */
+	return DIV_ROUND_UP(ticks * efx->timer_quantum_ns, 1000);
+}
+
 /* Set interrupt moderation parameters */
 int ef4_init_irq_moderation(struct ef4_nic *efx, unsigned int tx_usecs,
 			    unsigned int rx_usecs, bool rx_adaptive,
@@ -2003,7 +2012,7 @@ static void ef4_init_napi_channel(struct ef4_channel *channel)
 	struct ef4_nic *efx = channel->efx;
 
 	channel->napi_dev = efx->net_dev;
-	netif_napi_add(channel->napi_dev, &channel->napi_str, ef4_poll);
+	netif_napi_add(channel->napi_dev, &channel->napi_str, ef4_poll, 64);
 }
 
 static void ef4_init_napi(struct ef4_nic *efx)
@@ -2077,7 +2086,7 @@ int ef4_net_stop(struct net_device *net_dev)
 	return 0;
 }
 
-/* Context: process, rcu_read_lock or RTNL held, non-blocking. */
+/* Context: process, dev_base_lock or RTNL held, non-blocking. */
 static void ef4_net_stats(struct net_device *net_dev,
 			  struct rtnl_link_stats64 *stats)
 {
@@ -2117,7 +2126,7 @@ static int ef4_change_mtu(struct net_device *net_dev, int new_mtu)
 	ef4_stop_all(efx);
 
 	mutex_lock(&efx->mac_lock);
-	WRITE_ONCE(net_dev->mtu, new_mtu);
+	net_dev->mtu = new_mtu;
 	ef4_mac_reconfigure(efx);
 	mutex_unlock(&efx->mac_lock);
 
@@ -2320,7 +2329,7 @@ static void ef4_unregister_netdev(struct ef4_nic *efx)
 	BUG_ON(netdev_priv(efx->net_dev) != efx);
 
 	if (ef4_dev_registered(efx)) {
-		strscpy(efx->name, pci_name(efx->pci_dev), sizeof(efx->name));
+		strlcpy(efx->name, pci_name(efx->pci_dev), sizeof(efx->name));
 		device_remove_file(&efx->pci_dev->dev, &dev_attr_phy_type);
 		unregister_netdev(efx->net_dev);
 	}
@@ -2631,7 +2640,7 @@ static int ef4_init_struct(struct ef4_nic *efx,
 	efx->pci_dev = pci_dev;
 	efx->msg_enable = debug;
 	efx->state = STATE_UNINIT;
-	strscpy(efx->name, pci_name(pci_dev), sizeof(efx->name));
+	strlcpy(efx->name, pci_name(pci_dev), sizeof(efx->name));
 
 	efx->net_dev = net_dev;
 	efx->rx_prefix_size = efx->type->rx_prefix_size;
@@ -2756,6 +2765,8 @@ static void ef4_pci_remove(struct pci_dev *pci_dev)
 
 	ef4_fini_struct(efx);
 	free_netdev(efx->net_dev);
+
+	pci_disable_pcie_error_reporting(pci_dev);
 };
 
 /* NIC VPD information
@@ -2915,6 +2926,12 @@ static int ef4_pci_probe(struct pci_dev *pci_dev,
 	if (rc && rc != -EPERM)
 		netif_warn(efx, probe, efx->net_dev,
 			   "failed to create MTDs (%d)\n", rc);
+
+	rc = pci_enable_pcie_error_reporting(pci_dev);
+	if (rc && rc != -EINVAL)
+		netif_notice(efx, probe, efx->net_dev,
+			     "PCIE error reporting unavailable (%d).\n",
+			     rc);
 
 	return 0;
 

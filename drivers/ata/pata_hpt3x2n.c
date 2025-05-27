@@ -24,7 +24,7 @@
 #include <linux/libata.h>
 
 #define DRV_NAME	"pata_hpt3x2n"
-#define DRV_VERSION	"0.3.19"
+#define DRV_VERSION	"0.3.18"
 
 enum {
 	PCI66		=	(1 << 1),
@@ -113,7 +113,7 @@ static u32 hpt3x2n_find_mode(struct ata_port *ap, int speed)
  *	The Marvell bridge chips used on the HighPoint SATA cards do not seem
  *	to support the UltraDMA modes 1, 2, and 3 as well as any MWDMA modes...
  */
-static unsigned int hpt372n_filter(struct ata_device *adev, unsigned int mask)
+static unsigned long hpt372n_filter(struct ata_device *adev, unsigned long mask)
 {
 	if (ata_id_is_sata(adev->id))
 		mask &= ~((0xE << ATA_SHIFT_UDMA) | ATA_MASK_MWDMA);
@@ -337,7 +337,7 @@ static unsigned int hpt3x2n_qc_issue(struct ata_queued_cmd *qc)
 	return ata_bmdma_qc_issue(qc);
 }
 
-static const struct scsi_host_template hpt3x2n_sht = {
+static struct scsi_host_template hpt3x2n_sht = {
 	ATA_BMDMA_SHT(DRV_NAME),
 };
 
@@ -403,20 +403,17 @@ static int hpt3xn_calibrate_dpll(struct pci_dev *dev)
 	return 0;
 }
 
-static int hpt3x2n_pci_clock(struct pci_dev *pdev, unsigned int base)
+static int hpt3x2n_pci_clock(struct pci_dev *pdev)
 {
-	unsigned int freq;
+	unsigned long freq;
 	u32 fcnt;
+	unsigned long iobase = pci_resource_start(pdev, 4);
 
-	/*
-	 * Some devices do not let this value be accessed via PCI space
-	 * according to the old driver.
-	 */
-	fcnt = inl(pci_resource_start(pdev, 4) + 0x90);
+	fcnt = inl(iobase + 0x90);	/* Not PCI readable for some chips */
 	if ((fcnt >> 12) != 0xABCDE) {
-		u32 total = 0;
 		int i;
 		u16 sr;
+		u32 total = 0;
 
 		dev_warn(&pdev->dev, "BIOS clock data not set\n");
 
@@ -430,7 +427,7 @@ static int hpt3x2n_pci_clock(struct pci_dev *pdev, unsigned int base)
 	}
 	fcnt &= 0x1FF;
 
-	freq = (fcnt * base) / 192;	/* in MHz */
+	freq = (fcnt * 77) / 192;
 
 	/* Clamp to bands */
 	if (freq < 40)
@@ -562,7 +559,7 @@ hpt372n:
 	 * 50 for UDMA100. Right now we always use 66
 	 */
 
-	pci_mhz = hpt3x2n_pci_clock(dev, 77);
+	pci_mhz = hpt3x2n_pci_clock(dev);
 
 	f_low = (pci_mhz * 48) / 66;	/* PCI Mhz for 66Mhz DPLL */
 	f_high = f_low + 2;		/* Tolerance */

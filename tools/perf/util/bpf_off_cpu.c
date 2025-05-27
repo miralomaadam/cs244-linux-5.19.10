@@ -11,13 +11,11 @@
 #include "util/cpumap.h"
 #include "util/thread_map.h"
 #include "util/cgroup.h"
-#include "util/strlist.h"
 #include <bpf/bpf.h>
 
 #include "bpf_skel/off_cpu.skel.h"
 
 #define MAX_STACKS  32
-#define MAX_PROC  4096
 /* we don't need actual timestamp, just want to put the samples at last */
 #define OFF_CPU_TIMESTAMP  (~0ull << 32)
 
@@ -73,12 +71,13 @@ static void off_cpu_start(void *arg)
 	struct evlist *evlist = arg;
 
 	/* update task filter for the given workload */
-	if (skel->rodata->has_task && skel->rodata->uses_tgid &&
+	if (!skel->bss->has_cpu && !skel->bss->has_task &&
 	    perf_thread_map__pid(evlist->core.threads, 0) != -1) {
 		int fd;
 		u32 pid;
 		u8 val = 1;
 
+		skel->bss->has_task = 1;
 		fd = bpf_map__fd(skel->maps.task_filter);
 		pid = perf_thread_map__pid(evlist->core.threads, 0);
 		bpf_map_update_elem(fd, &pid, &val, BPF_ANY);
@@ -96,36 +95,28 @@ static void off_cpu_finish(void *arg __maybe_unused)
 /* v5.18 kernel added prev_state arg, so it needs to check the signature */
 static void check_sched_switch_args(void)
 {
-	struct btf *btf = btf__load_vmlinux_btf();
+	const struct btf *btf = bpf_object__btf(skel->obj);
 	const struct btf_type *t1, *t2, *t3;
 	u32 type_id;
 
-	if (!btf) {
-		pr_debug("Missing btf, check if CONFIG_DEBUG_INFO_BTF is enabled\n");
-		goto cleanup;
-	}
-
-	type_id = btf__find_by_name_kind(btf, "btf_trace_sched_switch",
+	type_id = btf__find_by_name_kind(btf, "bpf_trace_sched_switch",
 					 BTF_KIND_TYPEDEF);
 	if ((s32)type_id < 0)
-		goto cleanup;
+		return;
 
 	t1 = btf__type_by_id(btf, type_id);
 	if (t1 == NULL)
-		goto cleanup;
+		return;
 
 	t2 = btf__type_by_id(btf, t1->type);
 	if (t2 == NULL || !btf_is_ptr(t2))
-		goto cleanup;
+		return;
 
 	t3 = btf__type_by_id(btf, t2->type);
-	/* btf_trace func proto has one more argument for the context */
-	if (t3 && btf_is_func_proto(t3) && btf_vlen(t3) == 5) {
+	if (t3 && btf_is_func_proto(t3) && btf_vlen(t3) == 4) {
 		/* new format: pass prev_state as 4th arg */
 		skel->rodata->has_prev_state = true;
 	}
-cleanup:
-	btf__free(btf);
 }
 
 int off_cpu_prepare(struct evlist *evlist, struct target *target,
@@ -133,8 +124,6 @@ int off_cpu_prepare(struct evlist *evlist, struct target *target,
 {
 	int err, fd, i;
 	int ncpus = 1, ntasks = 1, ncgrps = 1;
-	struct strlist *pid_slist = NULL;
-	struct str_node *pos;
 
 	if (off_cpu_config(evlist) < 0) {
 		pr_err("Failed to config off-cpu BPF event\n");
@@ -151,42 +140,11 @@ int off_cpu_prepare(struct evlist *evlist, struct target *target,
 	if (target->cpu_list) {
 		ncpus = perf_cpu_map__nr(evlist->core.user_requested_cpus);
 		bpf_map__set_max_entries(skel->maps.cpu_filter, ncpus);
-		skel->rodata->has_cpu = 1;
 	}
 
-	if (target->pid) {
-		pid_slist = strlist__new(target->pid, NULL);
-		if (!pid_slist) {
-			pr_err("Failed to create a strlist for pid\n");
-			return -1;
-		}
-
-		ntasks = 0;
-		strlist__for_each_entry(pos, pid_slist) {
-			char *end_ptr;
-			int pid = strtol(pos->s, &end_ptr, 10);
-
-			if (pid == INT_MIN || pid == INT_MAX ||
-			    (*end_ptr != '\0' && *end_ptr != ','))
-				continue;
-
-			ntasks++;
-		}
-
-		if (ntasks < MAX_PROC)
-			ntasks = MAX_PROC;
-
-		bpf_map__set_max_entries(skel->maps.task_filter, ntasks);
-		skel->rodata->has_task = 1;
-		skel->rodata->uses_tgid = 1;
-	} else if (target__has_task(target)) {
+	if (target__has_task(target)) {
 		ntasks = perf_thread_map__nr(evlist->core.threads);
 		bpf_map__set_max_entries(skel->maps.task_filter, ntasks);
-		skel->rodata->has_task = 1;
-	} else if (target__none(target)) {
-		bpf_map__set_max_entries(skel->maps.task_filter, MAX_PROC);
-		skel->rodata->has_task = 1;
-		skel->rodata->uses_tgid = 1;
 	}
 
 	if (evlist__first(evlist)->cgrp) {
@@ -195,7 +153,6 @@ int off_cpu_prepare(struct evlist *evlist, struct target *target,
 
 		if (!cgroup_is_v2("perf_event"))
 			skel->rodata->uses_cgroup_v1 = true;
-		skel->rodata->has_cgroup = 1;
 	}
 
 	if (opts->record_cgroup) {
@@ -218,6 +175,7 @@ int off_cpu_prepare(struct evlist *evlist, struct target *target,
 		u32 cpu;
 		u8 val = 1;
 
+		skel->bss->has_cpu = 1;
 		fd = bpf_map__fd(skel->maps.cpu_filter);
 
 		for (i = 0; i < ncpus; i++) {
@@ -226,27 +184,11 @@ int off_cpu_prepare(struct evlist *evlist, struct target *target,
 		}
 	}
 
-	if (target->pid) {
-		u8 val = 1;
-
-		fd = bpf_map__fd(skel->maps.task_filter);
-
-		strlist__for_each_entry(pos, pid_slist) {
-			char *end_ptr;
-			u32 tgid;
-			int pid = strtol(pos->s, &end_ptr, 10);
-
-			if (pid == INT_MIN || pid == INT_MAX ||
-			    (*end_ptr != '\0' && *end_ptr != ','))
-				continue;
-
-			tgid = pid;
-			bpf_map_update_elem(fd, &tgid, &val, BPF_ANY);
-		}
-	} else if (target__has_task(target)) {
+	if (target__has_task(target)) {
 		u32 pid;
 		u8 val = 1;
 
+		skel->bss->has_task = 1;
 		fd = bpf_map__fd(skel->maps.task_filter);
 
 		for (i = 0; i < ntasks; i++) {
@@ -259,6 +201,7 @@ int off_cpu_prepare(struct evlist *evlist, struct target *target,
 		struct evsel *evsel;
 		u8 val = 1;
 
+		skel->bss->has_cgroup = 1;
 		fd = bpf_map__fd(skel->maps.cgroup_filter);
 
 		evlist__for_each_entry(evlist, evsel) {

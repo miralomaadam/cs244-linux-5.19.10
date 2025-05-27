@@ -18,10 +18,8 @@
 #include <linux/errno.h>
 #include <asm/types.h>
 #include <asm/byteorder.h>
-#include <asm/checksum.h>
-#if !defined(_HAVE_ARCH_COPY_AND_CSUM_FROM_USER) || !defined(HAVE_CSUM_COPY_USER)
 #include <linux/uaccess.h>
-#endif
+#include <asm/checksum.h>
 
 #ifndef _HAVE_ARCH_COPY_AND_CSUM_FROM_USER
 static __always_inline
@@ -149,12 +147,6 @@ static __always_inline void csum_replace2(__sum16 *sum, __be16 old, __be16 new)
 static inline void csum_replace(__wsum *csum, __wsum old, __wsum new)
 {
 	*csum = csum_add(csum_sub(*csum, old), new);
-}
-
-static inline unsigned short csum_from32to16(unsigned int sum)
-{
-	sum += (sum >> 16) | (sum << 16);
-	return (unsigned short)(sum >> 16);
 }
 
 struct sk_buff;

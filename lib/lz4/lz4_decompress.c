@@ -33,11 +33,12 @@
 /*-************************************
  *	Dependencies
  **************************************/
+#include <linux/lz4.h>
 #include "lz4defs.h"
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 
 /*-*****************************
  *	Decompression functions
@@ -506,9 +507,9 @@ static int LZ4_decompress_safe_withSmallPrefix(const char *source, char *dest,
 				      (BYTE *)dest - prefixSize, NULL, 0);
 }
 
-static int LZ4_decompress_safe_forceExtDict(const char *source, char *dest,
-					    int compressedSize, int maxOutputSize,
-					    const void *dictStart, size_t dictSize)
+int LZ4_decompress_safe_forceExtDict(const char *source, char *dest,
+				     int compressedSize, int maxOutputSize,
+				     const void *dictStart, size_t dictSize)
 {
 	return LZ4_decompress_generic(source, dest,
 				      compressedSize, maxOutputSize,

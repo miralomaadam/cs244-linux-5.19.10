@@ -951,7 +951,7 @@ static int vmci_transport_recv_listen(struct sock *sk,
 	 * for ourself or any previous connection requests that we received.
 	 * If it's the latter, we try to find a socket in our list of pending
 	 * connections and, if we do, call the appropriate handler for the
-	 * state that socket is in.  Otherwise we try to service the
+	 * state that that socket is in.  Otherwise we try to service the
 	 * connection request.
 	 */
 	pending = vmci_transport_get_pending(sk, pkt);
@@ -1711,11 +1711,7 @@ static int vmci_transport_dgram_enqueue(
 	if (!dg)
 		return -ENOMEM;
 
-	err = memcpy_from_msg(VMCI_DG_PAYLOAD(dg), msg, len);
-	if (err) {
-		kfree(dg);
-		return err;
-	}
+	memcpy_from_msg(VMCI_DG_PAYLOAD(dg), msg, len);
 
 	dg->dst = vmci_make_handle(remote_addr->svm_cid,
 				   remote_addr->svm_port);
@@ -1831,17 +1827,10 @@ static ssize_t vmci_transport_stream_dequeue(
 	size_t len,
 	int flags)
 {
-	ssize_t err;
-
 	if (flags & MSG_PEEK)
-		err = vmci_qpair_peekv(vmci_trans(vsk)->qpair, msg, len, 0);
+		return vmci_qpair_peekv(vmci_trans(vsk)->qpair, msg, len, 0);
 	else
-		err = vmci_qpair_dequev(vmci_trans(vsk)->qpair, msg, len, 0);
-
-	if (err < 0)
-		err = -ENOMEM;
-
-	return err;
+		return vmci_qpair_dequev(vmci_trans(vsk)->qpair, msg, len, 0);
 }
 
 static ssize_t vmci_transport_stream_enqueue(
@@ -1849,13 +1838,7 @@ static ssize_t vmci_transport_stream_enqueue(
 	struct msghdr *msg,
 	size_t len)
 {
-	ssize_t err;
-
-	err = vmci_qpair_enquev(vmci_trans(vsk)->qpair, msg, len, 0);
-	if (err < 0)
-		err = -ENOMEM;
-
-	return err;
+	return vmci_qpair_enquev(vmci_trans(vsk)->qpair, msg, len, 0);
 }
 
 static s64 vmci_transport_stream_has_data(struct vsock_sock *vsk)

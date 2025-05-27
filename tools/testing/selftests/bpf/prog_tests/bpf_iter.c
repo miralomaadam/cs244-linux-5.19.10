@@ -1,23 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright (c) 2020 Facebook */
 #include <test_progs.h>
-#include <unistd.h>
-#include <sys/syscall.h>
-#include <task_local_storage_helpers.h>
 #include "bpf_iter_ipv6_route.skel.h"
 #include "bpf_iter_netlink.skel.h"
 #include "bpf_iter_bpf_map.skel.h"
-#include "bpf_iter_tasks.skel.h"
+#include "bpf_iter_task.skel.h"
 #include "bpf_iter_task_stack.skel.h"
 #include "bpf_iter_task_file.skel.h"
-#include "bpf_iter_task_vmas.skel.h"
+#include "bpf_iter_task_vma.skel.h"
 #include "bpf_iter_task_btf.skel.h"
 #include "bpf_iter_tcp4.skel.h"
 #include "bpf_iter_tcp6.skel.h"
 #include "bpf_iter_udp4.skel.h"
 #include "bpf_iter_udp6.skel.h"
 #include "bpf_iter_unix.skel.h"
-#include "bpf_iter_vma_offset.skel.h"
 #include "bpf_iter_test_kern1.skel.h"
 #include "bpf_iter_test_kern2.skel.h"
 #include "bpf_iter_test_kern3.skel.h"
@@ -31,8 +27,8 @@
 #include "bpf_iter_test_kern5.skel.h"
 #include "bpf_iter_test_kern6.skel.h"
 #include "bpf_iter_bpf_link.skel.h"
-#include "bpf_iter_ksym.skel.h"
-#include "bpf_iter_sockmap.skel.h"
+
+static int duration;
 
 static void test_btf_id_or_null(void)
 {
@@ -45,13 +41,13 @@ static void test_btf_id_or_null(void)
 	}
 }
 
-static void do_dummy_read_opts(struct bpf_program *prog, struct bpf_iter_attach_opts *opts)
+static void do_dummy_read(struct bpf_program *prog)
 {
 	struct bpf_link *link;
 	char buf[16] = {};
 	int iter_fd, len;
 
-	link = bpf_program__attach_iter(prog, opts);
+	link = bpf_program__attach_iter(prog, NULL);
 	if (!ASSERT_OK_PTR(link, "attach_iter"))
 		return;
 
@@ -62,61 +58,12 @@ static void do_dummy_read_opts(struct bpf_program *prog, struct bpf_iter_attach_
 	/* not check contents, but ensure read() ends without error */
 	while ((len = read(iter_fd, buf, sizeof(buf))) > 0)
 		;
-	ASSERT_GE(len, 0, "read");
+	CHECK(len < 0, "read", "read failed: %s\n", strerror(errno));
 
 	close(iter_fd);
 
 free_link:
 	bpf_link__destroy(link);
-}
-
-static void do_dummy_read(struct bpf_program *prog)
-{
-	do_dummy_read_opts(prog, NULL);
-}
-
-static void do_read_map_iter_fd(struct bpf_object_skeleton **skel, struct bpf_program *prog,
-				struct bpf_map *map)
-{
-	DECLARE_LIBBPF_OPTS(bpf_iter_attach_opts, opts);
-	union bpf_iter_link_info linfo;
-	struct bpf_link *link;
-	char buf[16] = {};
-	int iter_fd, len;
-
-	memset(&linfo, 0, sizeof(linfo));
-	linfo.map.map_fd = bpf_map__fd(map);
-	opts.link_info = &linfo;
-	opts.link_info_len = sizeof(linfo);
-	link = bpf_program__attach_iter(prog, &opts);
-	if (!ASSERT_OK_PTR(link, "attach_map_iter"))
-		return;
-
-	iter_fd = bpf_iter_create(bpf_link__fd(link));
-	if (!ASSERT_GE(iter_fd, 0, "create_map_iter")) {
-		bpf_link__destroy(link);
-		return;
-	}
-
-	/* Close link and map fd prematurely */
-	bpf_link__destroy(link);
-	bpf_object__destroy_skeleton(*skel);
-	*skel = NULL;
-
-	/* Try to let map free work to run first if map is freed */
-	usleep(100);
-	/* Memory used by both sock map and sock local storage map are
-	 * freed after two synchronize_rcu() calls, so wait for it
-	 */
-	kern_sync_rcu();
-	kern_sync_rcu();
-
-	/* Read after both map fd and link fd are closed */
-	while ((len = read(iter_fd, buf, sizeof(buf))) > 0)
-		;
-	ASSERT_GE(len, 0, "read_iterator");
-
-	close(iter_fd);
 }
 
 static int read_fd_into_buffer(int fd, char *buf, int size)
@@ -174,215 +121,26 @@ static void test_bpf_map(void)
 	bpf_iter_bpf_map__destroy(skel);
 }
 
-static void check_bpf_link_info(const struct bpf_program *prog)
+static void test_task(void)
 {
-	LIBBPF_OPTS(bpf_iter_attach_opts, opts);
-	union bpf_iter_link_info linfo;
-	struct bpf_link_info info = {};
-	struct bpf_link *link;
-	__u32 info_len;
-	int err;
+	struct bpf_iter_task *skel;
 
-	memset(&linfo, 0, sizeof(linfo));
-	linfo.task.tid = getpid();
-	opts.link_info = &linfo;
-	opts.link_info_len = sizeof(linfo);
-
-	link = bpf_program__attach_iter(prog, &opts);
-	if (!ASSERT_OK_PTR(link, "attach_iter"))
+	skel = bpf_iter_task__open_and_load();
+	if (!ASSERT_OK_PTR(skel, "bpf_iter_task__open_and_load"))
 		return;
 
-	info_len = sizeof(info);
-	err = bpf_link_get_info_by_fd(bpf_link__fd(link), &info, &info_len);
-	ASSERT_OK(err, "bpf_link_get_info_by_fd");
-	ASSERT_EQ(info.iter.task.tid, getpid(), "check_task_tid");
+	do_dummy_read(skel->progs.dump_task);
 
-	bpf_link__destroy(link);
-}
-
-static pthread_mutex_t do_nothing_mutex;
-
-static void *do_nothing_wait(void *arg)
-{
-	pthread_mutex_lock(&do_nothing_mutex);
-	pthread_mutex_unlock(&do_nothing_mutex);
-
-	pthread_exit(arg);
-}
-
-static void test_task_common_nocheck(struct bpf_iter_attach_opts *opts,
-				     int *num_unknown, int *num_known)
-{
-	struct bpf_iter_tasks *skel;
-	pthread_t thread_id;
-	void *ret;
-
-	skel = bpf_iter_tasks__open_and_load();
-	if (!ASSERT_OK_PTR(skel, "bpf_iter_tasks__open_and_load"))
-		return;
-
-	ASSERT_OK(pthread_mutex_lock(&do_nothing_mutex), "pthread_mutex_lock");
-
-	ASSERT_OK(pthread_create(&thread_id, NULL, &do_nothing_wait, NULL),
-		  "pthread_create");
-
-	skel->bss->tid = sys_gettid();
-
-	do_dummy_read_opts(skel->progs.dump_task, opts);
-
-	*num_unknown = skel->bss->num_unknown_tid;
-	*num_known = skel->bss->num_known_tid;
-
-	ASSERT_OK(pthread_mutex_unlock(&do_nothing_mutex), "pthread_mutex_unlock");
-	ASSERT_FALSE(pthread_join(thread_id, &ret) || ret != NULL,
-		     "pthread_join");
-
-	bpf_iter_tasks__destroy(skel);
-}
-
-static void test_task_common(struct bpf_iter_attach_opts *opts, int num_unknown, int num_known)
-{
-	int num_unknown_tid, num_known_tid;
-
-	test_task_common_nocheck(opts, &num_unknown_tid, &num_known_tid);
-	ASSERT_EQ(num_unknown_tid, num_unknown, "check_num_unknown_tid");
-	ASSERT_EQ(num_known_tid, num_known, "check_num_known_tid");
-}
-
-static void *run_test_task_tid(void *arg)
-{
-	LIBBPF_OPTS(bpf_iter_attach_opts, opts);
-	union bpf_iter_link_info linfo;
-	int num_unknown_tid, num_known_tid;
-
-	ASSERT_NEQ(getpid(), sys_gettid(), "check_new_thread_id");
-
-	memset(&linfo, 0, sizeof(linfo));
-	linfo.task.tid = sys_gettid();
-	opts.link_info = &linfo;
-	opts.link_info_len = sizeof(linfo);
-	test_task_common(&opts, 0, 1);
-
-	linfo.task.tid = 0;
-	linfo.task.pid = getpid();
-	/* This includes the parent thread, this thread, watchdog timer thread
-	 * and the do_nothing_wait thread
-	 */
-	test_task_common(&opts, 3, 1);
-
-	test_task_common_nocheck(NULL, &num_unknown_tid, &num_known_tid);
-	ASSERT_GT(num_unknown_tid, 2, "check_num_unknown_tid");
-	ASSERT_EQ(num_known_tid, 1, "check_num_known_tid");
-
-	return NULL;
-}
-
-static void test_task_tid(void)
-{
-	pthread_t thread_id;
-
-	/* Create a new thread so pid and tid aren't the same */
-	ASSERT_OK(pthread_create(&thread_id, NULL, &run_test_task_tid, NULL),
-		  "pthread_create");
-	ASSERT_FALSE(pthread_join(thread_id, NULL), "pthread_join");
-}
-
-static void test_task_pid(void)
-{
-	LIBBPF_OPTS(bpf_iter_attach_opts, opts);
-	union bpf_iter_link_info linfo;
-
-	memset(&linfo, 0, sizeof(linfo));
-	linfo.task.pid = getpid();
-	opts.link_info = &linfo;
-	opts.link_info_len = sizeof(linfo);
-
-	test_task_common(&opts, 2, 1);
-}
-
-static void test_task_pidfd(void)
-{
-	LIBBPF_OPTS(bpf_iter_attach_opts, opts);
-	union bpf_iter_link_info linfo;
-	int pidfd;
-
-	pidfd = sys_pidfd_open(getpid(), 0);
-	if (!ASSERT_GT(pidfd, 0, "sys_pidfd_open"))
-		return;
-
-	memset(&linfo, 0, sizeof(linfo));
-	linfo.task.pid_fd = pidfd;
-	opts.link_info = &linfo;
-	opts.link_info_len = sizeof(linfo);
-
-	test_task_common(&opts, 2, 1);
-
-	close(pidfd);
+	bpf_iter_task__destroy(skel);
 }
 
 static void test_task_sleepable(void)
 {
-	struct bpf_iter_tasks *skel;
-	int pid, status, err, data_pipe[2], finish_pipe[2], c;
-	char *test_data = NULL;
-	char *test_data_long = NULL;
-	char *data[2];
+	struct bpf_iter_task *skel;
 
-	if (!ASSERT_OK(pipe(data_pipe), "data_pipe") ||
-	    !ASSERT_OK(pipe(finish_pipe), "finish_pipe"))
+	skel = bpf_iter_task__open_and_load();
+	if (!ASSERT_OK_PTR(skel, "bpf_iter_task__open_and_load"))
 		return;
-
-	skel = bpf_iter_tasks__open_and_load();
-	if (!ASSERT_OK_PTR(skel, "bpf_iter_tasks__open_and_load"))
-		return;
-
-	pid = fork();
-	if (!ASSERT_GE(pid, 0, "fork"))
-		return;
-
-	if (pid == 0) {
-		/* child */
-		close(data_pipe[0]);
-		close(finish_pipe[1]);
-
-		test_data = malloc(sizeof(char) * 10);
-		strncpy(test_data, "test_data", 10);
-		test_data[9] = '\0';
-
-		test_data_long = malloc(sizeof(char) * 5000);
-		for (int i = 0; i < 5000; ++i) {
-			if (i % 2 == 0)
-				test_data_long[i] = 'b';
-			else
-				test_data_long[i] = 'a';
-		}
-		test_data_long[4999] = '\0';
-
-		data[0] = test_data;
-		data[1] = test_data_long;
-
-		write(data_pipe[1], &data, sizeof(data));
-
-		/* keep child alive until after the test */
-		err = read(finish_pipe[0], &c, 1);
-		if (err != 1)
-			exit(-1);
-
-		close(data_pipe[1]);
-		close(finish_pipe[0]);
-		_exit(0);
-	}
-
-	/* parent */
-	close(data_pipe[1]);
-	close(finish_pipe[0]);
-
-	err = read(data_pipe[0], &data, sizeof(data));
-	ASSERT_EQ(err, sizeof(data), "read_check");
-
-	skel->bss->user_ptr = data[0];
-	skel->bss->user_ptr_long = data[1];
-	skel->bss->pid = pid;
 
 	do_dummy_read(skel->progs.dump_task_sleepable);
 
@@ -390,20 +148,8 @@ static void test_task_sleepable(void)
 		  "num_expected_failure_copy_from_user_task");
 	ASSERT_GT(skel->bss->num_success_copy_from_user_task, 0,
 		  "num_success_copy_from_user_task");
-	ASSERT_GT(skel->bss->num_expected_failure_copy_from_user_task_str, 0,
-		  "num_expected_failure_copy_from_user_task_str");
-	ASSERT_GT(skel->bss->num_success_copy_from_user_task_str, 0,
-		  "num_success_copy_from_user_task_str");
 
-	bpf_iter_tasks__destroy(skel);
-
-	write(finish_pipe[1], &c, 1);
-	err = waitpid(pid, &status, 0);
-	ASSERT_EQ(err, pid, "waitpid");
-	ASSERT_EQ(status, 0, "zero_child_exit");
-
-	close(data_pipe[0]);
-	close(finish_pipe[1]);
+	bpf_iter_task__destroy(skel);
 }
 
 static void test_task_stack(void)
@@ -417,16 +163,17 @@ static void test_task_stack(void)
 	do_dummy_read(skel->progs.dump_task_stack);
 	do_dummy_read(skel->progs.get_task_user_stacks);
 
-	ASSERT_EQ(skel->bss->num_user_stacks, 1, "num_user_stacks");
-
 	bpf_iter_task_stack__destroy(skel);
+}
+
+static void *do_nothing(void *arg)
+{
+	pthread_exit(arg);
 }
 
 static void test_task_file(void)
 {
-	LIBBPF_OPTS(bpf_iter_attach_opts, opts);
 	struct bpf_iter_task_file *skel;
-	union bpf_iter_link_info linfo;
 	pthread_t thread_id;
 	void *ret;
 
@@ -436,36 +183,19 @@ static void test_task_file(void)
 
 	skel->bss->tgid = getpid();
 
-	ASSERT_OK(pthread_mutex_lock(&do_nothing_mutex), "pthread_mutex_lock");
-
-	ASSERT_OK(pthread_create(&thread_id, NULL, &do_nothing_wait, NULL),
-		  "pthread_create");
-
-	memset(&linfo, 0, sizeof(linfo));
-	linfo.task.tid = getpid();
-	opts.link_info = &linfo;
-	opts.link_info_len = sizeof(linfo);
-
-	do_dummy_read_opts(skel->progs.dump_task_file, &opts);
-
-	ASSERT_EQ(skel->bss->count, 0, "check_count");
-	ASSERT_EQ(skel->bss->unique_tgid_count, 1, "check_unique_tgid_count");
-
-	skel->bss->last_tgid = 0;
-	skel->bss->count = 0;
-	skel->bss->unique_tgid_count = 0;
+	if (!ASSERT_OK(pthread_create(&thread_id, NULL, &do_nothing, NULL),
+		  "pthread_create"))
+		goto done;
 
 	do_dummy_read(skel->progs.dump_task_file);
 
+	if (!ASSERT_FALSE(pthread_join(thread_id, &ret) || ret != NULL,
+		  "pthread_join"))
+		goto done;
+
 	ASSERT_EQ(skel->bss->count, 0, "check_count");
-	ASSERT_GT(skel->bss->unique_tgid_count, 1, "check_unique_tgid_count");
 
-	check_bpf_link_info(skel->progs.dump_task_file);
-
-	ASSERT_OK(pthread_mutex_unlock(&do_nothing_mutex), "pthread_mutex_unlock");
-	ASSERT_OK(pthread_join(thread_id, &ret), "pthread_join");
-	ASSERT_NULL(ret, "pthread_join");
-
+done:
 	bpf_iter_task_file__destroy(skel);
 }
 
@@ -498,7 +228,7 @@ static int do_btf_read(struct bpf_iter_task_btf *skel)
 		goto free_link;
 	}
 
-	if (!ASSERT_GE(err, 0, "read"))
+	if (CHECK(err < 0, "read", "read failed: %s\n", strerror(errno)))
 		goto free_link;
 
 	ASSERT_HAS_SUBSTR(taskbuf, "(struct task_struct)",
@@ -611,11 +341,11 @@ static int do_read_with_fd(int iter_fd, const char *expected,
 	start = 0;
 	while ((len = read(iter_fd, buf + start, read_buf_len)) > 0) {
 		start += len;
-		if (!ASSERT_LT(start, 16, "read"))
+		if (CHECK(start >= 16, "read", "read len %d\n", len))
 			return -1;
 		read_buf_len = read_one_char ? 1 : 16 - start;
 	}
-	if (!ASSERT_GE(len, 0, "read"))
+	if (CHECK(len < 0, "read", "read failed: %s\n", strerror(errno)))
 		return -1;
 
 	if (!ASSERT_STREQ(buf, expected, "read"))
@@ -656,7 +386,8 @@ static int do_read(const char *path, const char *expected)
 	int err, iter_fd;
 
 	iter_fd = open(path, O_RDONLY);
-	if (!ASSERT_GE(iter_fd, 0, "open"))
+	if (CHECK(iter_fd < 0, "open", "open %s failed: %s\n",
+		  path, strerror(errno)))
 		return -1;
 
 	err = do_read_with_fd(iter_fd, expected, false);
@@ -684,7 +415,7 @@ static void test_file_iter(void)
 	unlink(path);
 
 	err = bpf_link__pin(link, path);
-	if (!ASSERT_OK(err, "pin_iter"))
+	if (CHECK(err, "pin_iter", "pin_iter to %s failed: %d\n", path, err))
 		goto free_link;
 
 	err = do_read(path, "abcd");
@@ -735,10 +466,12 @@ static void test_overflow(bool test_e2big_overflow, bool ret1)
 	 * overflow and needs restart.
 	 */
 	map1_fd = bpf_map_create(BPF_MAP_TYPE_ARRAY, NULL, 4, 8, 1, NULL);
-	if (!ASSERT_GE(map1_fd, 0, "bpf_map_create"))
+	if (CHECK(map1_fd < 0, "bpf_map_create",
+		  "map_creation failed: %s\n", strerror(errno)))
 		goto out;
 	map2_fd = bpf_map_create(BPF_MAP_TYPE_ARRAY, NULL, 4, 8, 1, NULL);
-	if (!ASSERT_GE(map2_fd, 0, "bpf_map_create"))
+	if (CHECK(map2_fd < 0, "bpf_map_create",
+		  "map_creation failed: %s\n", strerror(errno)))
 		goto free_map1;
 
 	/* bpf_seq_printf kernel buffer is 8 pages, so one map
@@ -766,13 +499,15 @@ static void test_overflow(bool test_e2big_overflow, bool ret1)
 
 	/* setup filtering map_id in bpf program */
 	map_info_len = sizeof(map_info);
-	err = bpf_map_get_info_by_fd(map1_fd, &map_info, &map_info_len);
-	if (!ASSERT_OK(err, "get_map_info"))
+	err = bpf_obj_get_info_by_fd(map1_fd, &map_info, &map_info_len);
+	if (CHECK(err, "get_map_info", "get map info failed: %s\n",
+		  strerror(errno)))
 		goto free_map2;
 	skel->bss->map1_id = map_info.id;
 
-	err = bpf_map_get_info_by_fd(map2_fd, &map_info, &map_info_len);
-	if (!ASSERT_OK(err, "get_map_info"))
+	err = bpf_obj_get_info_by_fd(map2_fd, &map_info, &map_info_len);
+	if (CHECK(err, "get_map_info", "get map info failed: %s\n",
+		  strerror(errno)))
 		goto free_map2;
 	skel->bss->map2_id = map_info.id;
 
@@ -785,7 +520,7 @@ static void test_overflow(bool test_e2big_overflow, bool ret1)
 		goto free_link;
 
 	buf = malloc(expected_read_len);
-	if (!ASSERT_OK_PTR(buf, "malloc"))
+	if (!buf)
 		goto close_iter;
 
 	/* do read */
@@ -794,14 +529,16 @@ static void test_overflow(bool test_e2big_overflow, bool ret1)
 		while ((len = read(iter_fd, buf, expected_read_len)) > 0)
 			total_read_len += len;
 
-		ASSERT_EQ(len, -1, "read");
-		ASSERT_EQ(errno, E2BIG, "read");
+		CHECK(len != -1 || errno != E2BIG, "read",
+		      "expected ret -1, errno E2BIG, but get ret %d, error %s\n",
+			  len, strerror(errno));
 		goto free_buf;
 	} else if (!ret1) {
 		while ((len = read(iter_fd, buf, expected_read_len)) > 0)
 			total_read_len += len;
 
-		if (!ASSERT_GE(len, 0, "read"))
+		if (CHECK(len < 0, "read", "read failed: %s\n",
+			  strerror(errno)))
 			goto free_buf;
 	} else {
 		do {
@@ -810,7 +547,8 @@ static void test_overflow(bool test_e2big_overflow, bool ret1)
 				total_read_len += len;
 		} while (len > 0 || len == -EAGAIN);
 
-		if (!ASSERT_GE(len, 0, "read"))
+		if (CHECK(len < 0, "read", "read failed: %s\n",
+			  strerror(errno)))
 			goto free_buf;
 	}
 
@@ -895,12 +633,6 @@ static void test_bpf_hash_map(void)
 			goto out;
 	}
 
-	/* Sleepable program is prohibited for hash map iterator */
-	linfo.map.map_fd = map_fd;
-	link = bpf_program__attach_iter(skel->progs.sleepable_dummy_dump, &opts);
-	if (!ASSERT_ERR_PTR(link, "attach_sleepable_prog_to_iter"))
-		goto out;
-
 	linfo.map.map_fd = map_fd;
 	link = bpf_program__attach_iter(skel->progs.dump_bpf_hash_map, &opts);
 	if (!ASSERT_OK_PTR(link, "attach_iter"))
@@ -913,7 +645,7 @@ static void test_bpf_hash_map(void)
 	/* do some tests */
 	while ((len = read(iter_fd, buf, sizeof(buf))) > 0)
 		;
-	if (!ASSERT_GE(len, 0, "read"))
+	if (CHECK(len < 0, "read", "read failed: %s\n", strerror(errno)))
 		goto close_iter;
 
 	/* test results */
@@ -955,8 +687,6 @@ static void test_bpf_percpu_hash_map(void)
 
 	skel->rodata->num_cpus = bpf_num_possible_cpus();
 	val = malloc(8 * bpf_num_possible_cpus());
-	if (!ASSERT_OK_PTR(val, "malloc"))
-		goto out;
 
 	err = bpf_iter_bpf_percpu_hash_map__load(skel);
 	if (!ASSERT_OK_PTR(skel, "bpf_iter_bpf_percpu_hash_map__load"))
@@ -996,7 +726,7 @@ static void test_bpf_percpu_hash_map(void)
 	/* do some tests */
 	while ((len = read(iter_fd, buf, sizeof(buf))) > 0)
 		;
-	if (!ASSERT_GE(len, 0, "read"))
+	if (CHECK(len < 0, "read", "read failed: %s\n", strerror(errno)))
 		goto close_iter;
 
 	/* test results */
@@ -1020,10 +750,10 @@ static void test_bpf_array_map(void)
 {
 	__u64 val, expected_val = 0, res_first_val, first_val = 0;
 	DECLARE_LIBBPF_OPTS(bpf_iter_attach_opts, opts);
-	__u32 key, expected_key = 0, res_first_key;
-	int err, i, map_fd, hash_fd, iter_fd;
+	__u32 expected_key = 0, res_first_key;
 	struct bpf_iter_bpf_array_map *skel;
 	union bpf_iter_link_info linfo;
+	int err, i, map_fd, iter_fd;
 	struct bpf_link *link;
 	char buf[64] = {};
 	int len, start;
@@ -1062,14 +792,17 @@ static void test_bpf_array_map(void)
 	start = 0;
 	while ((len = read(iter_fd, buf + start, sizeof(buf) - start)) > 0)
 		start += len;
-	if (!ASSERT_GE(len, 0, "read"))
+	if (CHECK(len < 0, "read", "read failed: %s\n", strerror(errno)))
 		goto close_iter;
 
 	/* test results */
 	res_first_key = *(__u32 *)buf;
 	res_first_val = *(__u64 *)(buf + sizeof(__u32));
-	if (!ASSERT_EQ(res_first_key, 0, "bpf_seq_write") ||
-			!ASSERT_EQ(res_first_val, first_val, "bpf_seq_write"))
+	if (CHECK(res_first_key != 0 || res_first_val != first_val,
+		  "bpf_seq_write",
+		  "seq_write failure: first key %u vs expected 0, "
+		  " first value %llu vs expected %llu\n",
+		  res_first_key, res_first_val, first_val))
 		goto close_iter;
 
 	if (!ASSERT_EQ(skel->bss->key_sum, expected_key, "key_sum"))
@@ -1077,20 +810,12 @@ static void test_bpf_array_map(void)
 	if (!ASSERT_EQ(skel->bss->val_sum, expected_val, "val_sum"))
 		goto close_iter;
 
-	hash_fd = bpf_map__fd(skel->maps.hashmap1);
 	for (i = 0; i < bpf_map__max_entries(skel->maps.arraymap1); i++) {
 		err = bpf_map_lookup_elem(map_fd, &i, &val);
-		if (!ASSERT_OK(err, "map_lookup arraymap1"))
-			goto close_iter;
-		if (!ASSERT_EQ(i, val, "invalid_val arraymap1"))
-			goto close_iter;
-
-		val = i + 4;
-		err = bpf_map_lookup_elem(hash_fd, &val, &key);
-		if (!ASSERT_OK(err, "map_lookup hashmap1"))
-			goto close_iter;
-		if (!ASSERT_EQ(key, val - 4, "invalid_val hashmap1"))
-			goto close_iter;
+		if (!ASSERT_OK(err, "map_lookup"))
+			goto out;
+		if (!ASSERT_EQ(i, val, "invalid_val"))
+			goto out;
 	}
 
 close_iter:
@@ -1098,20 +823,6 @@ close_iter:
 free_link:
 	bpf_link__destroy(link);
 out:
-	bpf_iter_bpf_array_map__destroy(skel);
-}
-
-static void test_bpf_array_map_iter_fd(void)
-{
-	struct bpf_iter_bpf_array_map *skel;
-
-	skel = bpf_iter_bpf_array_map__open_and_load();
-	if (!ASSERT_OK_PTR(skel, "bpf_iter_bpf_array_map__open_and_load"))
-		return;
-
-	do_read_map_iter_fd(&skel->skeleton, skel->progs.dump_bpf_array_map,
-			    skel->maps.arraymap1);
-
 	bpf_iter_bpf_array_map__destroy(skel);
 }
 
@@ -1133,8 +844,6 @@ static void test_bpf_percpu_array_map(void)
 
 	skel->rodata->num_cpus = bpf_num_possible_cpus();
 	val = malloc(8 * bpf_num_possible_cpus());
-	if (!ASSERT_OK_PTR(val, "malloc"))
-		goto out;
 
 	err = bpf_iter_bpf_percpu_array_map__load(skel);
 	if (!ASSERT_OK_PTR(skel, "bpf_iter_bpf_percpu_array_map__load"))
@@ -1170,7 +879,7 @@ static void test_bpf_percpu_array_map(void)
 	/* do some tests */
 	while ((len = read(iter_fd, buf, sizeof(buf))) > 0)
 		;
-	if (!ASSERT_GE(len, 0, "read"))
+	if (CHECK(len < 0, "read", "read failed: %s\n", strerror(errno)))
 		goto close_iter;
 
 	/* test results */
@@ -1209,7 +918,6 @@ static void test_bpf_sk_storage_delete(void)
 	sock_fd = socket(AF_INET6, SOCK_STREAM, 0);
 	if (!ASSERT_GE(sock_fd, 0, "socket"))
 		goto out;
-
 	err = bpf_map_update_elem(map_fd, &sock_fd, &val, BPF_NOEXIST);
 	if (!ASSERT_OK(err, "map_update"))
 		goto out;
@@ -1230,19 +938,14 @@ static void test_bpf_sk_storage_delete(void)
 	/* do some tests */
 	while ((len = read(iter_fd, buf, sizeof(buf))) > 0)
 		;
-	if (!ASSERT_GE(len, 0, "read"))
+	if (CHECK(len < 0, "read", "read failed: %s\n", strerror(errno)))
 		goto close_iter;
 
 	/* test results */
 	err = bpf_map_lookup_elem(map_fd, &sock_fd, &val);
-
-	 /* Note: The following assertions serve to ensure
-	  * the value was deleted. It does so by asserting
-	  * that bpf_map_lookup_elem has failed. This might
-	  * seem counterintuitive at first.
-	  */
-	ASSERT_ERR(err, "bpf_map_lookup_elem");
-	ASSERT_EQ(errno, ENOENT, "bpf_map_lookup_elem");
+	if (CHECK(!err || errno != ENOENT, "bpf_map_lookup_elem",
+		  "map value wasn't deleted (err=%d, errno=%d)\n", err, errno))
+		goto close_iter;
 
 close_iter:
 	close(iter_fd);
@@ -1287,34 +990,22 @@ static void test_bpf_sk_storage_get(void)
 	do_dummy_read(skel->progs.fill_socket_owner);
 
 	err = bpf_map_lookup_elem(map_fd, &sock_fd, &val);
-	if (!ASSERT_OK(err, "bpf_map_lookup_elem") ||
-			!ASSERT_EQ(val, getpid(), "bpf_map_lookup_elem"))
+	if (CHECK(err || val != getpid(), "bpf_map_lookup_elem",
+	    "map value wasn't set correctly (expected %d, got %d, err=%d)\n",
+	    getpid(), val, err))
 		goto close_socket;
 
 	do_dummy_read(skel->progs.negate_socket_local_storage);
 
 	err = bpf_map_lookup_elem(map_fd, &sock_fd, &val);
-	ASSERT_OK(err, "bpf_map_lookup_elem");
-	ASSERT_EQ(val, -getpid(), "bpf_map_lookup_elem");
+	CHECK(err || val != -getpid(), "bpf_map_lookup_elem",
+	      "map value wasn't set correctly (expected %d, got %d, err=%d)\n",
+	      -getpid(), val, err);
 
 close_socket:
 	close(sock_fd);
 out:
 	bpf_iter_bpf_sk_storage_helpers__destroy(skel);
-}
-
-static void test_bpf_sk_storage_map_iter_fd(void)
-{
-	struct bpf_iter_bpf_sk_storage_map *skel;
-
-	skel = bpf_iter_bpf_sk_storage_map__open_and_load();
-	if (!ASSERT_OK_PTR(skel, "bpf_iter_bpf_sk_storage_map__open_and_load"))
-		return;
-
-	do_read_map_iter_fd(&skel->skeleton, skel->progs.rw_bpf_sk_storage_map,
-			    skel->maps.sk_stg_map);
-
-	bpf_iter_bpf_sk_storage_map__destroy(skel);
 }
 
 static void test_bpf_sk_storage_map(void)
@@ -1352,15 +1043,7 @@ static void test_bpf_sk_storage_map(void)
 	linfo.map.map_fd = map_fd;
 	opts.link_info = &linfo;
 	opts.link_info_len = sizeof(linfo);
-	link = bpf_program__attach_iter(skel->progs.oob_write_bpf_sk_storage_map, &opts);
-	err = libbpf_get_error(link);
-	if (!ASSERT_EQ(err, -EACCES, "attach_oob_write_iter")) {
-		if (!err)
-			bpf_link__destroy(link);
-		goto out;
-	}
-
-	link = bpf_program__attach_iter(skel->progs.rw_bpf_sk_storage_map, &opts);
+	link = bpf_program__attach_iter(skel->progs.dump_bpf_sk_storage_map, &opts);
 	if (!ASSERT_OK_PTR(link, "attach_iter"))
 		goto out;
 
@@ -1368,11 +1051,10 @@ static void test_bpf_sk_storage_map(void)
 	if (!ASSERT_GE(iter_fd, 0, "create_iter"))
 		goto free_link;
 
-	skel->bss->to_add_val = time(NULL);
 	/* do some tests */
 	while ((len = read(iter_fd, buf, sizeof(buf))) > 0)
 		;
-	if (!ASSERT_GE(len, 0, "read"))
+	if (CHECK(len < 0, "read", "read failed: %s\n", strerror(errno)))
 		goto close_iter;
 
 	/* test results */
@@ -1381,13 +1063,6 @@ static void test_bpf_sk_storage_map(void)
 
 	if (!ASSERT_EQ(skel->bss->val_sum, expected_val, "val_sum"))
 		goto close_iter;
-
-	for (i = 0; i < num_sockets; i++) {
-		err = bpf_map_lookup_elem(map_fd, &sock_fd[i], &val);
-		if (!ASSERT_OK(err, "map_lookup") ||
-		    !ASSERT_EQ(val, i + 1 + skel->bss->to_add_val, "check_map_value"))
-			break;
-	}
 
 close_iter:
 	close(iter_fd);
@@ -1445,19 +1120,6 @@ static void test_link_iter(void)
 	bpf_iter_bpf_link__destroy(skel);
 }
 
-static void test_ksym_iter(void)
-{
-	struct bpf_iter_ksym *skel;
-
-	skel = bpf_iter_ksym__open_and_load();
-	if (!ASSERT_OK_PTR(skel, "bpf_iter_ksym__open_and_load"))
-		return;
-
-	do_dummy_read(skel->progs.dump_ksym);
-
-	bpf_iter_ksym__destroy(skel);
-}
-
 #define CMP_BUFFER_SIZE 1024
 static char task_vma_output[CMP_BUFFER_SIZE];
 static char proc_maps_output[CMP_BUFFER_SIZE];
@@ -1478,26 +1140,25 @@ static void str_strip_first_line(char *str)
 	*dst = '\0';
 }
 
-static void test_task_vma_common(struct bpf_iter_attach_opts *opts)
+static void test_task_vma(void)
 {
 	int err, iter_fd = -1, proc_maps_fd = -1;
-	struct bpf_iter_task_vmas *skel;
+	struct bpf_iter_task_vma *skel;
 	int len, read_size = 4;
 	char maps_path[64];
 
-	skel = bpf_iter_task_vmas__open();
-	if (!ASSERT_OK_PTR(skel, "bpf_iter_task_vmas__open"))
+	skel = bpf_iter_task_vma__open();
+	if (!ASSERT_OK_PTR(skel, "bpf_iter_task_vma__open"))
 		return;
 
 	skel->bss->pid = getpid();
-	skel->bss->one_task = opts ? 1 : 0;
 
-	err = bpf_iter_task_vmas__load(skel);
-	if (!ASSERT_OK(err, "bpf_iter_task_vmas__load"))
+	err = bpf_iter_task_vma__load(skel);
+	if (!ASSERT_OK(err, "bpf_iter_task_vma__load"))
 		goto out;
 
 	skel->links.proc_maps = bpf_program__attach_iter(
-		skel->progs.proc_maps, opts);
+		skel->progs.proc_maps, NULL);
 
 	if (!ASSERT_OK_PTR(skel->links.proc_maps, "bpf_program__attach_iter")) {
 		skel->links.proc_maps = NULL;
@@ -1521,8 +1182,6 @@ static void test_task_vma_common(struct bpf_iter_attach_opts *opts)
 			goto out;
 		len += err;
 	}
-	if (opts)
-		ASSERT_EQ(skel->bss->one_task_error, 0, "unexpected task");
 
 	/* read CMP_BUFFER_SIZE (1kB) from /proc/pid/maps */
 	snprintf(maps_path, 64, "/proc/%u/maps", skel->bss->pid);
@@ -1538,185 +1197,14 @@ static void test_task_vma_common(struct bpf_iter_attach_opts *opts)
 	str_strip_first_line(proc_maps_output);
 
 	ASSERT_STREQ(task_vma_output, proc_maps_output, "compare_output");
-
-	check_bpf_link_info(skel->progs.proc_maps);
-
 out:
 	close(proc_maps_fd);
 	close(iter_fd);
-	bpf_iter_task_vmas__destroy(skel);
-}
-
-static void test_task_vma_dead_task(void)
-{
-	struct bpf_iter_task_vmas *skel;
-	int wstatus, child_pid = -1;
-	time_t start_tm, cur_tm;
-	int err, iter_fd = -1;
-	int wait_sec = 3;
-
-	skel = bpf_iter_task_vmas__open();
-	if (!ASSERT_OK_PTR(skel, "bpf_iter_task_vmas__open"))
-		return;
-
-	skel->bss->pid = getpid();
-
-	err = bpf_iter_task_vmas__load(skel);
-	if (!ASSERT_OK(err, "bpf_iter_task_vmas__load"))
-		goto out;
-
-	skel->links.proc_maps = bpf_program__attach_iter(
-		skel->progs.proc_maps, NULL);
-
-	if (!ASSERT_OK_PTR(skel->links.proc_maps, "bpf_program__attach_iter")) {
-		skel->links.proc_maps = NULL;
-		goto out;
-	}
-
-	start_tm = time(NULL);
-	cur_tm = start_tm;
-
-	child_pid = fork();
-	if (child_pid == 0) {
-		/* Fork short-lived processes in the background. */
-		while (cur_tm < start_tm + wait_sec) {
-			system("echo > /dev/null");
-			cur_tm = time(NULL);
-		}
-		exit(0);
-	}
-
-	if (!ASSERT_GE(child_pid, 0, "fork_child"))
-		goto out;
-
-	while (cur_tm < start_tm + wait_sec) {
-		iter_fd = bpf_iter_create(bpf_link__fd(skel->links.proc_maps));
-		if (!ASSERT_GE(iter_fd, 0, "create_iter"))
-			goto out;
-
-		/* Drain all data from iter_fd. */
-		while (cur_tm < start_tm + wait_sec) {
-			err = read_fd_into_buffer(iter_fd, task_vma_output, CMP_BUFFER_SIZE);
-			if (!ASSERT_GE(err, 0, "read_iter_fd"))
-				goto out;
-
-			cur_tm = time(NULL);
-
-			if (err == 0)
-				break;
-		}
-
-		close(iter_fd);
-		iter_fd = -1;
-	}
-
-	check_bpf_link_info(skel->progs.proc_maps);
-
-out:
-	waitpid(child_pid, &wstatus, 0);
-	close(iter_fd);
-	bpf_iter_task_vmas__destroy(skel);
-}
-
-void test_bpf_sockmap_map_iter_fd(void)
-{
-	struct bpf_iter_sockmap *skel;
-
-	skel = bpf_iter_sockmap__open_and_load();
-	if (!ASSERT_OK_PTR(skel, "bpf_iter_sockmap__open_and_load"))
-		return;
-
-	do_read_map_iter_fd(&skel->skeleton, skel->progs.copy, skel->maps.sockmap);
-
-	bpf_iter_sockmap__destroy(skel);
-}
-
-static void test_task_vma(void)
-{
-	LIBBPF_OPTS(bpf_iter_attach_opts, opts);
-	union bpf_iter_link_info linfo;
-
-	memset(&linfo, 0, sizeof(linfo));
-	linfo.task.tid = getpid();
-	opts.link_info = &linfo;
-	opts.link_info_len = sizeof(linfo);
-
-	test_task_vma_common(&opts);
-	test_task_vma_common(NULL);
-}
-
-/* uprobe attach point */
-static noinline int trigger_func(int arg)
-{
-	asm volatile ("");
-	return arg + 1;
-}
-
-static void test_task_vma_offset_common(struct bpf_iter_attach_opts *opts, bool one_proc)
-{
-	struct bpf_iter_vma_offset *skel;
-	char buf[16] = {};
-	int iter_fd, len;
-	int pgsz, shift;
-
-	skel = bpf_iter_vma_offset__open_and_load();
-	if (!ASSERT_OK_PTR(skel, "bpf_iter_vma_offset__open_and_load"))
-		return;
-
-	skel->bss->pid = getpid();
-	skel->bss->address = (uintptr_t)trigger_func;
-	for (pgsz = getpagesize(), shift = 0; pgsz > 1; pgsz >>= 1, shift++)
-		;
-	skel->bss->page_shift = shift;
-
-	skel->links.get_vma_offset = bpf_program__attach_iter(skel->progs.get_vma_offset, opts);
-	if (!ASSERT_OK_PTR(skel->links.get_vma_offset, "attach_iter"))
-		goto exit;
-
-	iter_fd = bpf_iter_create(bpf_link__fd(skel->links.get_vma_offset));
-	if (!ASSERT_GT(iter_fd, 0, "create_iter"))
-		goto exit;
-
-	while ((len = read(iter_fd, buf, sizeof(buf))) > 0)
-		;
-	buf[15] = 0;
-	ASSERT_EQ(strcmp(buf, "OK\n"), 0, "strcmp");
-
-	ASSERT_EQ(skel->bss->offset, get_uprobe_offset(trigger_func), "offset");
-	if (one_proc)
-		ASSERT_EQ(skel->bss->unique_tgid_cnt, 1, "unique_tgid_count");
-	else
-		ASSERT_GT(skel->bss->unique_tgid_cnt, 1, "unique_tgid_count");
-
-	close(iter_fd);
-
-exit:
-	bpf_iter_vma_offset__destroy(skel);
-}
-
-static void test_task_vma_offset(void)
-{
-	LIBBPF_OPTS(bpf_iter_attach_opts, opts);
-	union bpf_iter_link_info linfo;
-
-	memset(&linfo, 0, sizeof(linfo));
-	linfo.task.pid = getpid();
-	opts.link_info = &linfo;
-	opts.link_info_len = sizeof(linfo);
-
-	test_task_vma_offset_common(&opts, true);
-
-	linfo.task.pid = 0;
-	linfo.task.tid = getpid();
-	test_task_vma_offset_common(&opts, true);
-
-	test_task_vma_offset_common(NULL, false);
+	bpf_iter_task_vma__destroy(skel);
 }
 
 void test_bpf_iter(void)
 {
-	ASSERT_OK(pthread_mutex_init(&do_nothing_mutex, NULL), "pthread_mutex_init");
-
 	if (test__start_subtest("btf_id_or_null"))
 		test_btf_id_or_null();
 	if (test__start_subtest("ipv6_route"))
@@ -1725,12 +1213,8 @@ void test_bpf_iter(void)
 		test_netlink();
 	if (test__start_subtest("bpf_map"))
 		test_bpf_map();
-	if (test__start_subtest("task_tid"))
-		test_task_tid();
-	if (test__start_subtest("task_pid"))
-		test_task_pid();
-	if (test__start_subtest("task_pidfd"))
-		test_task_pidfd();
+	if (test__start_subtest("task"))
+		test_task();
 	if (test__start_subtest("task_sleepable"))
 		test_task_sleepable();
 	if (test__start_subtest("task_stack"))
@@ -1739,8 +1223,6 @@ void test_bpf_iter(void)
 		test_task_file();
 	if (test__start_subtest("task_vma"))
 		test_task_vma();
-	if (test__start_subtest("task_vma_dead_task"))
-		test_task_vma_dead_task();
 	if (test__start_subtest("task_btf"))
 		test_task_btf();
 	if (test__start_subtest("tcp4"))
@@ -1771,14 +1253,10 @@ void test_bpf_iter(void)
 		test_bpf_percpu_hash_map();
 	if (test__start_subtest("bpf_array_map"))
 		test_bpf_array_map();
-	if (test__start_subtest("bpf_array_map_iter_fd"))
-		test_bpf_array_map_iter_fd();
 	if (test__start_subtest("bpf_percpu_array_map"))
 		test_bpf_percpu_array_map();
 	if (test__start_subtest("bpf_sk_storage_map"))
 		test_bpf_sk_storage_map();
-	if (test__start_subtest("bpf_sk_storage_map_iter_fd"))
-		test_bpf_sk_storage_map_iter_fd();
 	if (test__start_subtest("bpf_sk_storage_delete"))
 		test_bpf_sk_storage_delete();
 	if (test__start_subtest("bpf_sk_storage_get"))
@@ -1789,10 +1267,4 @@ void test_bpf_iter(void)
 		test_buf_neg_offset();
 	if (test__start_subtest("link-iter"))
 		test_link_iter();
-	if (test__start_subtest("ksym"))
-		test_ksym_iter();
-	if (test__start_subtest("bpf_sockmap_map_iter_fd"))
-		test_bpf_sockmap_map_iter_fd();
-	if (test__start_subtest("vma_offset"))
-		test_task_vma_offset();
 }

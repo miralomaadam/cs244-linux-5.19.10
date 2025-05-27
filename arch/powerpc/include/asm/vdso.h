@@ -2,8 +2,10 @@
 #ifndef _ASM_POWERPC_VDSO_H
 #define _ASM_POWERPC_VDSO_H
 
+/* Default map addresses for 32bit vDSO */
+#define VDSO32_MBASE	0x100000
+
 #define VDSO_VERSION_STRING	LINUX_2.6.15
-#define __VDSO_PAGES		4
 
 #ifndef __ASSEMBLY__
 
@@ -26,7 +28,6 @@ int vdso_getcpu_init(void);
 #ifdef __VDSO64__
 #define V_FUNCTION_BEGIN(name)		\
 	.globl name;			\
-	.type name,@function; 		\
 	name:				\
 
 #define V_FUNCTION_END(name)		\

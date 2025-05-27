@@ -14,11 +14,13 @@
 #include <linux/delay.h>
 #include <linux/pm.h>
 #include <linux/i2c.h>
+#include <linux/gpio.h>
 #include <linux/gpio/consumer.h>
 #include <linux/regulator/consumer.h>
 #include <linux/firmware.h>
 #include <linux/regmap.h>
 #include <linux/of.h>
+#include <linux/of_gpio.h>
 #include <linux/slab.h>
 #include <sound/soc.h>
 #include <sound/pcm.h>
@@ -189,31 +191,6 @@ static int tas2770_mute(struct snd_soc_dai *dai, int mute, int direction)
 	return tas2770_update_pwr_ctrl(tas2770);
 }
 
-static int tas2770_set_ivsense_transmit(struct tas2770_priv *tas2770,
-					int i_slot, int v_slot)
-{
-	struct snd_soc_component *component = tas2770->component;
-	int ret;
-
-	ret = snd_soc_component_update_bits(component, TAS2770_TDM_CFG_REG5,
-					    TAS2770_TDM_CFG_REG5_VSNS_MASK |
-					    TAS2770_TDM_CFG_REG5_50_MASK,
-					    TAS2770_TDM_CFG_REG5_VSNS_ENABLE |
-					    v_slot);
-	if (ret < 0)
-		return ret;
-
-	ret = snd_soc_component_update_bits(component, TAS2770_TDM_CFG_REG6,
-					    TAS2770_TDM_CFG_REG6_ISNS_MASK |
-					    TAS2770_TDM_CFG_REG6_50_MASK,
-					    TAS2770_TDM_CFG_REG6_ISNS_ENABLE |
-					    i_slot);
-	if (ret < 0)
-		return ret;
-
-	return 0;
-}
-
 static int tas2770_set_bitwidth(struct tas2770_priv *tas2770, int bitwidth)
 {
 	int ret;
@@ -224,22 +201,41 @@ static int tas2770_set_bitwidth(struct tas2770_priv *tas2770, int bitwidth)
 		ret = snd_soc_component_update_bits(component, TAS2770_TDM_CFG_REG2,
 						    TAS2770_TDM_CFG_REG2_RXW_MASK,
 						    TAS2770_TDM_CFG_REG2_RXW_16BITS);
+		tas2770->v_sense_slot = tas2770->i_sense_slot + 2;
 		break;
 	case SNDRV_PCM_FORMAT_S24_LE:
 		ret = snd_soc_component_update_bits(component, TAS2770_TDM_CFG_REG2,
 						    TAS2770_TDM_CFG_REG2_RXW_MASK,
 						    TAS2770_TDM_CFG_REG2_RXW_24BITS);
+		tas2770->v_sense_slot = tas2770->i_sense_slot + 4;
 		break;
 	case SNDRV_PCM_FORMAT_S32_LE:
 		ret = snd_soc_component_update_bits(component, TAS2770_TDM_CFG_REG2,
 						    TAS2770_TDM_CFG_REG2_RXW_MASK,
 						    TAS2770_TDM_CFG_REG2_RXW_32BITS);
+		tas2770->v_sense_slot = tas2770->i_sense_slot + 4;
 		break;
 
 	default:
 		return -EINVAL;
 	}
 
+	if (ret < 0)
+		return ret;
+
+	ret = snd_soc_component_update_bits(component, TAS2770_TDM_CFG_REG5,
+					    TAS2770_TDM_CFG_REG5_VSNS_MASK |
+					    TAS2770_TDM_CFG_REG5_50_MASK,
+					    TAS2770_TDM_CFG_REG5_VSNS_ENABLE |
+		tas2770->v_sense_slot);
+	if (ret < 0)
+		return ret;
+
+	ret = snd_soc_component_update_bits(component, TAS2770_TDM_CFG_REG6,
+					    TAS2770_TDM_CFG_REG6_ISNS_MASK |
+					    TAS2770_TDM_CFG_REG6_50_MASK,
+					    TAS2770_TDM_CFG_REG6_ISNS_ENABLE |
+					    tas2770->i_sense_slot);
 	if (ret < 0)
 		return ret;
 
@@ -315,11 +311,11 @@ static int tas2770_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	u8 tdm_rx_start_slot = 0, invert_fpol = 0, fpol_preinv = 0, asi_cfg_1 = 0;
 	int ret;
 
-	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
-	case SND_SOC_DAIFMT_CBC_CFC:
+	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+	case SND_SOC_DAIFMT_CBS_CFS:
 		break;
 	default:
-		dev_err(tas2770->dev, "ASI invalid DAI clocking\n");
+		dev_err(tas2770->dev, "ASI format master is not found\n");
 		return -EINVAL;
 	}
 
@@ -399,13 +395,21 @@ static int tas2770_set_dai_tdm_slot(struct snd_soc_dai *dai,
 	if (tx_mask == 0 || rx_mask != 0)
 		return -EINVAL;
 
-	left_slot = __ffs(tx_mask);
-	tx_mask &= ~(1 << left_slot);
-	if (tx_mask == 0) {
-		right_slot = left_slot;
+	if (slots == 1) {
+		if (tx_mask != 1)
+			return -EINVAL;
+
+		left_slot = 0;
+		right_slot = 0;
 	} else {
-		right_slot = __ffs(tx_mask);
-		tx_mask &= ~(1 << right_slot);
+		left_slot = __ffs(tx_mask);
+		tx_mask &= ~(1 << left_slot);
+		if (tx_mask == 0) {
+			right_slot = left_slot;
+		} else {
+			right_slot = __ffs(tx_mask);
+			tx_mask &= ~(1 << right_slot);
+		}
 	}
 
 	if (tx_mask != 0 || left_slot >= slots || right_slot >= slots)
@@ -491,13 +495,10 @@ static struct snd_soc_dai_driver tas2770_dai_driver[] = {
 	},
 };
 
-static const struct regmap_config tas2770_i2c_regmap;
-
 static int tas2770_codec_probe(struct snd_soc_component *component)
 {
 	struct tas2770_priv *tas2770 =
 			snd_soc_component_get_drvdata(component);
-	int ret;
 
 	tas2770->component = component;
 
@@ -507,21 +508,12 @@ static int tas2770_codec_probe(struct snd_soc_component *component)
 	}
 
 	tas2770_reset(tas2770);
-	regmap_reinit_cache(tas2770->regmap, &tas2770_i2c_regmap);
-
-	if (tas2770->i_sense_slot != -1 && tas2770->v_sense_slot != -1) {
-		ret = tas2770_set_ivsense_transmit(tas2770, tas2770->i_sense_slot,
-						   tas2770->v_sense_slot);
-
-		if (ret < 0)
-			return ret;
-	}
 
 	return 0;
 }
 
 static DECLARE_TLV_DB_SCALE(tas2770_digital_tlv, 1100, 50, 0);
-static DECLARE_TLV_DB_SCALE(tas2770_playback_volume, -10050, 50, 0);
+static DECLARE_TLV_DB_SCALE(tas2770_playback_volume, -12750, 50, 0);
 
 static const struct snd_kcontrol_new tas2770_snd_controls[] = {
 	SOC_SINGLE_TLV("Speaker Playback Volume", TAS2770_PLAY_CFG_REG2,
@@ -542,6 +534,7 @@ static const struct snd_soc_component_driver soc_component_driver_tas2770 = {
 	.num_dapm_routes	= ARRAY_SIZE(tas2770_audio_map),
 	.idle_bias_on		= 1,
 	.endianness		= 1,
+	.non_legacy_dai_naming	= 1,
 };
 
 static int tas2770_register_codec(struct tas2770_priv *tas2770)
@@ -644,7 +637,7 @@ static int tas2770_parse_dt(struct device *dev, struct tas2770_priv *tas2770)
 		dev_info(tas2770->dev, "Property %s is missing setting default slot\n",
 			 "ti,imon-slot-no");
 
-		tas2770->i_sense_slot = -1;
+		tas2770->i_sense_slot = 0;
 	}
 
 	rc = fwnode_property_read_u32(dev->fwnode, "ti,vmon-slot-no",
@@ -653,7 +646,7 @@ static int tas2770_parse_dt(struct device *dev, struct tas2770_priv *tas2770)
 		dev_info(tas2770->dev, "Property %s is missing setting default slot\n",
 			 "ti,vmon-slot-no");
 
-		tas2770->v_sense_slot = -1;
+		tas2770->v_sense_slot = 2;
 	}
 
 	tas2770->sdz_gpio = devm_gpiod_get_optional(dev, "shutdown", GPIOD_OUT_HIGH);
@@ -715,7 +708,7 @@ static int tas2770_i2c_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tas2770_i2c_id[] = {
-	{ "tas2770"},
+	{ "tas2770", 0},
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tas2770_i2c_id);
@@ -733,7 +726,7 @@ static struct i2c_driver tas2770_i2c_driver = {
 		.name   = "tas2770",
 		.of_match_table = of_match_ptr(tas2770_of_match),
 	},
-	.probe      = tas2770_i2c_probe,
+	.probe_new  = tas2770_i2c_probe,
 	.id_table   = tas2770_i2c_id,
 };
 module_i2c_driver(tas2770_i2c_driver);

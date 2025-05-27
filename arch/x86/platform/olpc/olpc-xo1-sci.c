@@ -14,6 +14,7 @@
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
+#include <linux/pm_wakeup.h>
 #include <linux/power_supply.h>
 #include <linux/suspend.h>
 #include <linux/workqueue.h>
@@ -597,7 +598,7 @@ err_ebook:
 	return r;
 }
 
-static void xo1_sci_remove(struct platform_device *pdev)
+static int xo1_sci_remove(struct platform_device *pdev)
 {
 	free_irq(sci_irq, pdev);
 	cancel_work_sync(&sci_work);
@@ -607,6 +608,7 @@ static void xo1_sci_remove(struct platform_device *pdev)
 	free_ebook_switch();
 	free_power_button();
 	acpi_base = 0;
+	return 0;
 }
 
 static struct platform_driver xo1_sci_driver = {

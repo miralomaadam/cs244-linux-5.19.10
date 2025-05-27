@@ -3,7 +3,7 @@
  * Maxim MAX77714 Register and data structures definition.
  *
  * Copyright (C) 2022 Luca Ceresoli
- * Author: Luca Ceresoli <luca.ceresoli@bootlin.com>
+ * Author: Luca Ceresoli <luca@lucaceresoli.net>
  */
 
 #ifndef __LINUX_MFD_MAX77714_H_

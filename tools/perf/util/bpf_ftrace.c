@@ -11,7 +11,6 @@
 #include "util/debug.h"
 #include "util/evlist.h"
 #include "util/bpf_counter.h"
-#include "util/stat.h"
 
 #include "util/bpf_skel/func_latency.skel.h"
 
@@ -37,27 +36,16 @@ int perf_ftrace__latency_prepare_bpf(struct perf_ftrace *ftrace)
 		return -1;
 	}
 
-	skel->rodata->bucket_range = ftrace->bucket_range;
-	skel->rodata->min_latency = ftrace->min_latency;
-	skel->rodata->bucket_num = ftrace->bucket_num;
-	if (ftrace->bucket_range && ftrace->bucket_num) {
-		bpf_map__set_max_entries(skel->maps.latency, ftrace->bucket_num);
-	}
-
 	/* don't need to set cpu filter for system-wide mode */
 	if (ftrace->target.cpu_list) {
 		ncpus = perf_cpu_map__nr(ftrace->evlist->core.user_requested_cpus);
 		bpf_map__set_max_entries(skel->maps.cpu_filter, ncpus);
-		skel->rodata->has_cpu = 1;
 	}
 
 	if (target__has_task(&ftrace->target) || target__none(&ftrace->target)) {
 		ntasks = perf_thread_map__nr(ftrace->evlist->core.threads);
 		bpf_map__set_max_entries(skel->maps.task_filter, ntasks);
-		skel->rodata->has_task = 1;
 	}
-
-	skel->rodata->use_nsec = ftrace->use_nsec;
 
 	set_max_rlimit();
 
@@ -71,6 +59,7 @@ int perf_ftrace__latency_prepare_bpf(struct perf_ftrace *ftrace)
 		u32 cpu;
 		u8 val = 1;
 
+		skel->bss->has_cpu = 1;
 		fd = bpf_map__fd(skel->maps.cpu_filter);
 
 		for (i = 0; i < ncpus; i++) {
@@ -83,6 +72,7 @@ int perf_ftrace__latency_prepare_bpf(struct perf_ftrace *ftrace)
 		u32 pid;
 		u8 val = 1;
 
+		skel->bss->has_task = 1;
 		fd = bpf_map__fd(skel->maps.task_filter);
 
 		for (i = 0; i < ntasks; i++) {
@@ -91,7 +81,7 @@ int perf_ftrace__latency_prepare_bpf(struct perf_ftrace *ftrace)
 		}
 	}
 
-	skel->bss->min = INT64_MAX;
+	skel->bss->use_nsec = ftrace->use_nsec;
 
 	skel->links.func_begin = bpf_program__attach_kprobe(skel->progs.func_begin,
 							    false, func->name);
@@ -128,8 +118,8 @@ int perf_ftrace__latency_stop_bpf(struct perf_ftrace *ftrace __maybe_unused)
 	return 0;
 }
 
-int perf_ftrace__latency_read_bpf(struct perf_ftrace *ftrace,
-				  int buckets[], struct stats *stats)
+int perf_ftrace__latency_read_bpf(struct perf_ftrace *ftrace __maybe_unused,
+				  int buckets[])
 {
 	int i, fd, err;
 	u32 idx;
@@ -142,7 +132,7 @@ int perf_ftrace__latency_read_bpf(struct perf_ftrace *ftrace,
 	if (hist == NULL)
 		return -ENOMEM;
 
-	for (idx = 0; idx < skel->rodata->bucket_num; idx++) {
+	for (idx = 0; idx < NUM_BUCKET; idx++) {
 		err = bpf_map_lookup_elem(fd, &idx, hist);
 		if (err) {
 			buckets[idx] = 0;
@@ -151,19 +141,6 @@ int perf_ftrace__latency_read_bpf(struct perf_ftrace *ftrace,
 
 		for (i = 0; i < ncpus; i++)
 			buckets[idx] += hist[i];
-	}
-
-	if (skel->bss->count) {
-		stats->mean = skel->bss->total / skel->bss->count;
-		stats->n = skel->bss->count;
-		stats->max = skel->bss->max;
-		stats->min = skel->bss->min;
-
-		if (!ftrace->use_nsec) {
-			stats->mean /= 1000;
-			stats->max /= 1000;
-			stats->min /= 1000;
-		}
 	}
 
 	free(hist);

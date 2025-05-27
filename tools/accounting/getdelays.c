@@ -45,6 +45,7 @@
 		exit(code);			\
 	} while (0)
 
+int done;
 int rcvbufsz;
 char name[100];
 int dbg;
@@ -192,77 +193,54 @@ static int get_family_id(int sd)
 }
 
 #define average_ms(t, c) (t / 1000000ULL / (c ? c : 1))
-#define delay_ms(t) (t / 1000000ULL)
 
 static void print_delayacct(struct taskstats *t)
 {
-	printf("\n\nCPU   %15s%15s%15s%15s%15s%15s%15s\n"
-	       "      %15llu%15llu%15llu%15llu%15.3fms%13.6fms%13.6fms\n"
-	       "IO    %15s%15s%15s%15s%15s\n"
-	       "      %15llu%15llu%15.3fms%13.6fms%13.6fms\n"
-	       "SWAP  %15s%15s%15s%15s%15s\n"
-	       "      %15llu%15llu%15.3fms%13.6fms%13.6fms\n"
-	       "RECLAIM  %12s%15s%15s%15s%15s\n"
-	       "      %15llu%15llu%15.3fms%13.6fms%13.6fms\n"
-	       "THRASHING%12s%15s%15s%15s%15s\n"
-	       "      %15llu%15llu%15.3fms%13.6fms%13.6fms\n"
-	       "COMPACT  %12s%15s%15s%15s%15s\n"
-	       "      %15llu%15llu%15.3fms%13.6fms%13.6fms\n"
-	       "WPCOPY   %12s%15s%15s%15s%15s\n"
-	       "      %15llu%15llu%15.3fms%13.6fms%13.6fms\n"
-	       "IRQ   %15s%15s%15s%15s%15s\n"
-	       "      %15llu%15llu%15.3fms%13.6fms%13.6fms\n",
+	printf("\n\nCPU   %15s%15s%15s%15s%15s\n"
+	       "      %15llu%15llu%15llu%15llu%15.3fms\n"
+	       "IO    %15s%15s%15s\n"
+	       "      %15llu%15llu%15llums\n"
+	       "SWAP  %15s%15s%15s\n"
+	       "      %15llu%15llu%15llums\n"
+	       "RECLAIM  %12s%15s%15s\n"
+	       "      %15llu%15llu%15llums\n"
+	       "THRASHING%12s%15s%15s\n"
+	       "      %15llu%15llu%15llums\n"
+	       "COMPACT  %12s%15s%15s\n"
+	       "      %15llu%15llu%15llums\n"
+	       "WPCOPY   %12s%15s%15s\n"
+	       "      %15llu%15llu%15llums\n",
 	       "count", "real total", "virtual total",
-	       "delay total", "delay average", "delay max", "delay min",
+	       "delay total", "delay average",
 	       (unsigned long long)t->cpu_count,
 	       (unsigned long long)t->cpu_run_real_total,
 	       (unsigned long long)t->cpu_run_virtual_total,
 	       (unsigned long long)t->cpu_delay_total,
 	       average_ms((double)t->cpu_delay_total, t->cpu_count),
-	       delay_ms((double)t->cpu_delay_max),
-	       delay_ms((double)t->cpu_delay_min),
-	       "count", "delay total", "delay average", "delay max", "delay min",
+	       "count", "delay total", "delay average",
 	       (unsigned long long)t->blkio_count,
 	       (unsigned long long)t->blkio_delay_total,
-	       average_ms((double)t->blkio_delay_total, t->blkio_count),
-	       delay_ms((double)t->blkio_delay_max),
-	       delay_ms((double)t->blkio_delay_min),
-	       "count", "delay total", "delay average", "delay max", "delay min",
+	       average_ms(t->blkio_delay_total, t->blkio_count),
+	       "count", "delay total", "delay average",
 	       (unsigned long long)t->swapin_count,
 	       (unsigned long long)t->swapin_delay_total,
-	       average_ms((double)t->swapin_delay_total, t->swapin_count),
-	       delay_ms((double)t->swapin_delay_max),
-	       delay_ms((double)t->swapin_delay_min),
-	       "count", "delay total", "delay average", "delay max", "delay min",
+	       average_ms(t->swapin_delay_total, t->swapin_count),
+	       "count", "delay total", "delay average",
 	       (unsigned long long)t->freepages_count,
 	       (unsigned long long)t->freepages_delay_total,
-	       average_ms((double)t->freepages_delay_total, t->freepages_count),
-	       delay_ms((double)t->freepages_delay_max),
-	       delay_ms((double)t->freepages_delay_min),
-	       "count", "delay total", "delay average", "delay max", "delay min",
+	       average_ms(t->freepages_delay_total, t->freepages_count),
+	       "count", "delay total", "delay average",
 	       (unsigned long long)t->thrashing_count,
 	       (unsigned long long)t->thrashing_delay_total,
-	       average_ms((double)t->thrashing_delay_total, t->thrashing_count),
-	       delay_ms((double)t->thrashing_delay_max),
-	       delay_ms((double)t->thrashing_delay_min),
-	       "count", "delay total", "delay average", "delay max", "delay min",
+	       average_ms(t->thrashing_delay_total, t->thrashing_count),
+	       "count", "delay total", "delay average",
 	       (unsigned long long)t->compact_count,
 	       (unsigned long long)t->compact_delay_total,
-	       average_ms((double)t->compact_delay_total, t->compact_count),
-	       delay_ms((double)t->compact_delay_max),
-	       delay_ms((double)t->compact_delay_min),
-	       "count", "delay total", "delay average", "delay max", "delay min",
+	       average_ms(t->compact_delay_total, t->compact_count),
+	       "count", "delay total", "delay average",
 	       (unsigned long long)t->wpcopy_count,
 	       (unsigned long long)t->wpcopy_delay_total,
-	       average_ms((double)t->wpcopy_delay_total, t->wpcopy_count),
-	       delay_ms((double)t->wpcopy_delay_max),
-	       delay_ms((double)t->wpcopy_delay_min),
-	       "count", "delay total", "delay average", "delay max", "delay min",
-	       (unsigned long long)t->irq_count,
-	       (unsigned long long)t->irq_delay_total,
-	       average_ms((double)t->irq_delay_total, t->irq_count),
-	       delay_ms((double)t->irq_delay_max),
-	       delay_ms((double)t->irq_delay_min));
+	       average_ms(t->wpcopy_delay_total, t->wpcopy_count));
 }
 
 static void task_context_switch_counts(struct taskstats *t)
@@ -307,6 +285,7 @@ int main(int argc, char *argv[])
 	pid_t rtid = 0;
 
 	int fd = 0;
+	int count = 0;
 	int write_file = 0;
 	int maskset = 0;
 	char *logfile = NULL;
@@ -516,6 +495,7 @@ int main(int argc, char *argv[])
 				len2 = 0;
 				/* For nested attributes, na follows */
 				na = (struct nlattr *) NLA_DATA(na);
+				done = 0;
 				while (len2 < aggr_len) {
 					switch (na->nla_type) {
 					case TASKSTATS_TYPE_PID:
@@ -529,6 +509,7 @@ int main(int argc, char *argv[])
 							printf("TGID\t%d\n", rtid);
 						break;
 					case TASKSTATS_TYPE_STATS:
+						count++;
 						if (print_delays)
 							print_delayacct((struct taskstats *) NLA_DATA(na));
 						if (print_io_accounting)

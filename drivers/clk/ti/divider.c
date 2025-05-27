@@ -1,10 +1,18 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * TI Divider Clock
  *
  * Copyright (C) 2013 Texas Instruments, Inc.
  *
  * Tero Kristo <t-kristo@ti.com>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed "as is" WITHOUT ANY WARRANTY of any
+ * kind, whether express or implied; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  */
 
 #include <linux/clk-provider.h>
@@ -309,6 +317,7 @@ static struct clk *_register_divider(struct device_node *node,
 				     u32 flags,
 				     struct clk_omap_divider *div)
 {
+	struct clk *clk;
 	struct clk_init_data init;
 	const char *parent_name;
 	const char *name;
@@ -325,7 +334,12 @@ static struct clk *_register_divider(struct device_node *node,
 	div->hw.init = &init;
 
 	/* register the clock */
-	return of_ti_clk_register(node, &div->hw, name);
+	clk = ti_clk_register(NULL, &div->hw, name);
+
+	if (IS_ERR(clk))
+		kfree(div);
+
+	return clk;
 }
 
 int ti_clk_parse_divider_data(int *div_table, int num_dividers, int max_div,
@@ -477,7 +491,10 @@ static int __init ti_clk_divider_populate(struct device_node *node,
 	if (ret)
 		return ret;
 
-	div->shift = div->reg.bit;
+	if (!of_property_read_u32(node, "ti,bit-shift", &val))
+		div->shift = val;
+	else
+		div->shift = 0;
 
 	if (!of_property_read_u32(node, "ti,latch-bit", &val))
 		div->latch = val;

@@ -77,13 +77,13 @@ static inline void evaluate_test(int err, const char *msg)
 {
 	switch (err) {
 	case KSFT_PASS:
-		ksft_test_result_pass("%s", msg);
+		ksft_test_result_pass(msg);
 		break;
 	case KSFT_FAIL:
-		ksft_test_result_fail("%s", msg);
+		ksft_test_result_fail(msg);
 		break;
 	case KSFT_SKIP:
-		ksft_test_result_skip("%s", msg);
+		ksft_test_result_skip(msg);
 		break;
 	default:
 		ksft_test_result_error("Unknown return code %d from %s",

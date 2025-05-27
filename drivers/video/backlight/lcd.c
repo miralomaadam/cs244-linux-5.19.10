@@ -20,24 +20,6 @@
 
 #if defined(CONFIG_FB) || (defined(CONFIG_FB_MODULE) && \
 			   defined(CONFIG_LCD_CLASS_DEVICE_MODULE))
-static int to_lcd_power(int fb_blank)
-{
-	switch (fb_blank) {
-	case FB_BLANK_UNBLANK:
-		return LCD_POWER_ON;
-	/* deprecated; TODO: should become 'off' */
-	case FB_BLANK_NORMAL:
-		return LCD_POWER_REDUCED;
-	case FB_BLANK_VSYNC_SUSPEND:
-		return LCD_POWER_REDUCED_VSYNC_SUSPEND;
-	/* 'off' */
-	case FB_BLANK_HSYNC_SUSPEND:
-	case FB_BLANK_POWERDOWN:
-	default:
-		return LCD_POWER_OFF;
-	}
-}
-
 /* This callback gets called when something important happens inside a
  * framebuffer driver. We're looking if that important event is blanking,
  * and if it is, we're switching lcd power as well ...
@@ -45,32 +27,24 @@ static int to_lcd_power(int fb_blank)
 static int fb_notifier_callback(struct notifier_block *self,
 				 unsigned long event, void *data)
 {
-	struct lcd_device *ld = container_of(self, struct lcd_device, fb_notif);
+	struct lcd_device *ld;
 	struct fb_event *evdata = data;
-	struct fb_info *info = evdata->info;
-	struct lcd_device *fb_lcd = fb_lcd_device(info);
 
-	guard(mutex)(&ld->ops_lock);
-
+	ld = container_of(self, struct lcd_device, fb_notif);
 	if (!ld->ops)
 		return 0;
-	if (ld->ops->controls_device && !ld->ops->controls_device(ld, info->device))
-		return 0;
-	if (fb_lcd && fb_lcd != ld)
-		return 0;
 
-	if (event == FB_EVENT_BLANK) {
-		int power = to_lcd_power(*(int *)evdata->data);
-
-		if (ld->ops->set_power)
-			ld->ops->set_power(ld, power);
-	} else {
-		const struct fb_videomode *videomode = evdata->data;
-
-		if (ld->ops->set_mode)
-			ld->ops->set_mode(ld, videomode->xres, videomode->yres);
+	mutex_lock(&ld->ops_lock);
+	if (!ld->ops->check_fb || ld->ops->check_fb(ld, evdata->info)) {
+		if (event == FB_EVENT_BLANK) {
+			if (ld->ops->set_power)
+				ld->ops->set_power(ld, *(int *)evdata->data);
+		} else {
+			if (ld->ops->set_mode)
+				ld->ops->set_mode(ld, evdata->data);
+		}
 	}
-
+	mutex_unlock(&ld->ops_lock);
 	return 0;
 }
 
@@ -185,6 +159,8 @@ static ssize_t max_contrast_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(max_contrast);
 
+static struct class *lcd_class;
+
 static void lcd_device_release(struct device *dev)
 {
 	struct lcd_device *ld = to_lcd_device(dev);
@@ -199,11 +175,6 @@ static struct attribute *lcd_device_attrs[] = {
 };
 ATTRIBUTE_GROUPS(lcd_device);
 
-static const struct class lcd_class = {
-	.name = "lcd",
-	.dev_groups = lcd_device_groups,
-};
-
 /**
  * lcd_device_register - register a new object of lcd_device class.
  * @name: the name of the new object(must be the same as the name of the
@@ -217,7 +188,7 @@ static const struct class lcd_class = {
  * or a pointer to the newly allocated device.
  */
 struct lcd_device *lcd_device_register(const char *name, struct device *parent,
-		void *devdata, const struct lcd_ops *ops)
+		void *devdata, struct lcd_ops *ops)
 {
 	struct lcd_device *new_ld;
 	int rc;
@@ -231,7 +202,7 @@ struct lcd_device *lcd_device_register(const char *name, struct device *parent,
 	mutex_init(&new_ld->ops_lock);
 	mutex_init(&new_ld->update_lock);
 
-	new_ld->dev.class = &lcd_class;
+	new_ld->dev.class = lcd_class;
 	new_ld->dev.parent = parent;
 	new_ld->dev.release = lcd_device_release;
 	dev_set_name(&new_ld->dev, "%s", name);
@@ -305,7 +276,7 @@ static int devm_lcd_device_match(struct device *dev, void *res, void *data)
  */
 struct lcd_device *devm_lcd_device_register(struct device *dev,
 		const char *name, struct device *parent,
-		void *devdata, const struct lcd_ops *ops)
+		void *devdata, struct lcd_ops *ops)
 {
 	struct lcd_device **ptr, *lcd;
 
@@ -347,19 +318,19 @@ EXPORT_SYMBOL(devm_lcd_device_unregister);
 
 static void __exit lcd_class_exit(void)
 {
-	class_unregister(&lcd_class);
+	class_destroy(lcd_class);
 }
 
 static int __init lcd_class_init(void)
 {
-	int ret;
-
-	ret = class_register(&lcd_class);
-	if (ret) {
-		pr_warn("Unable to create backlight class; errno = %d\n", ret);
-		return ret;
+	lcd_class = class_create(THIS_MODULE, "lcd");
+	if (IS_ERR(lcd_class)) {
+		pr_warn("Unable to create backlight class; errno = %ld\n",
+			PTR_ERR(lcd_class));
+		return PTR_ERR(lcd_class);
 	}
 
+	lcd_class->dev_groups = lcd_device_groups;
 	return 0;
 }
 

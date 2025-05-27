@@ -14,8 +14,6 @@
 
 #include <linux/compiler.h>
 #include <linux/stringify.h>
-
-#include <asm/bootparam.h>
 #include <asm/ptrace.h>
 #include <asm/types.h>
 #include <asm/regs.h>
@@ -115,9 +113,9 @@
 #define MAKE_RA_FOR_CALL(ra,ws)   (((ra) & 0x3fffffff) | (ws) << 30)
 
 /* Convert return address to a valid pc
- * Note: 'text' is the address within the same 1GB range as the ra
+ * Note: We assume that the stack pointer is in the same 1GB ranges as the ra
  */
-#define MAKE_PC_FROM_RA(ra, text) (((ra) & 0x3fffffff) | ((unsigned long)(text) & 0xc0000000))
+#define MAKE_PC_FROM_RA(ra,sp)    (((ra) & 0x3fffffff) | ((sp) & 0xc0000000))
 
 #elif defined(__XTENSA_CALL0_ABI__)
 
@@ -127,9 +125,9 @@
 #define MAKE_RA_FOR_CALL(ra, ws)   (ra)
 
 /* Convert return address to a valid pc
- * Note: 'text' is not used as 'ra' is always the full address
+ * Note: We assume that the stack pointer is in the same 1GB ranges as the ra
  */
-#define MAKE_PC_FROM_RA(ra, text)  (ra)
+#define MAKE_PC_FROM_RA(ra, sp)    (ra)
 
 #else
 #error Unsupported Xtensa ABI
@@ -156,11 +154,18 @@ struct thread_struct {
 	unsigned long ra; /* kernel's a0: return address and window call size */
 	unsigned long sp; /* kernel's a1: stack pointer */
 
+	/* struct xtensa_cpuinfo info; */
+
+	unsigned long bad_vaddr; /* last user fault */
+	unsigned long bad_uaddr; /* last kernel fault accessing user space */
+	unsigned long error_code;
 #ifdef CONFIG_HAVE_HW_BREAKPOINT
 	struct perf_event *ptrace_bp[XCHAL_NUM_IBREAK];
 	struct perf_event *ptrace_wp[XCHAL_NUM_DBREAK];
 #endif
-} __aligned(16);
+	/* Make structure 16 bytes aligned. */
+	int align[0] __attribute__ ((aligned(16)));
+};
 
 /* This decides where the kernel will search for a free chunk of vm
  * space during mmap's.
@@ -171,6 +176,10 @@ struct thread_struct {
 {									\
 	ra:		0, 						\
 	sp:		sizeof(init_stack) + (long) &init_stack,	\
+	/*info:		{0}, */						\
+	bad_vaddr:	0,						\
+	bad_uaddr:	0,						\
+	error_code:	0,						\
 }
 
 
@@ -196,12 +205,9 @@ struct thread_struct {
 #define start_thread(regs, new_pc, new_sp) \
 	do { \
 		unsigned long syscall = (regs)->syscall; \
-		unsigned long current_aregs[16]; \
-		memcpy(current_aregs, (regs)->areg, sizeof(current_aregs)); \
 		memset((regs), 0, sizeof(*(regs))); \
 		(regs)->pc = (new_pc); \
 		(regs)->ps = USER_PS_VALUE; \
-		memcpy((regs)->areg, current_aregs, sizeof(current_aregs)); \
 		(regs)->areg[1] = (new_sp); \
 		(regs)->areg[0] = 0; \
 		(regs)->wmask = 1; \
@@ -215,10 +221,10 @@ struct thread_struct {
 struct task_struct;
 struct mm_struct;
 
-extern unsigned long __get_wchan(struct task_struct *p);
+/* Free all resources held by a thread. */
+#define release_thread(thread) do { } while(0)
 
-void init_arch(bp_tag_t *bp_start);
-void do_notify_resume(struct pt_regs *regs);
+extern unsigned long __get_wchan(struct task_struct *p);
 
 #define KSTK_EIP(tsk)		(task_pt_regs(tsk)->pc)
 #define KSTK_ESP(tsk)		(task_pt_regs(tsk)->areg[1])

@@ -8,6 +8,9 @@
  *
  *  proc net directory handling functions
  */
+
+#include <linux/uaccess.h>
+
 #include <linux/errno.h>
 #include <linux/time.h>
 #include <linux/proc_fs.h>
@@ -135,7 +138,6 @@ EXPORT_SYMBOL_GPL(proc_create_net_data);
  * @parent: The parent directory in which to create.
  * @ops: The seq_file ops with which to read the file.
  * @write: The write method with which to 'modify' the file.
- * @state_size: The size of the per-file private state to allocate.
  * @data: Data for retrieval by pde_data().
  *
  * Create a network namespaced proc file in the @parent directory with the
@@ -300,7 +302,7 @@ static struct dentry *proc_tgid_net_lookup(struct inode *dir,
 	return de;
 }
 
-static int proc_tgid_net_getattr(struct mnt_idmap *idmap,
+static int proc_tgid_net_getattr(struct user_namespace *mnt_userns,
 				 const struct path *path, struct kstat *stat,
 				 u32 request_mask, unsigned int query_flags)
 {
@@ -309,7 +311,7 @@ static int proc_tgid_net_getattr(struct mnt_idmap *idmap,
 
 	net = get_proc_task_net(inode);
 
-	generic_fillattr(&nop_mnt_idmap, request_mask, inode, stat);
+	generic_fillattr(&init_user_ns, inode, stat);
 
 	if (net != NULL) {
 		stat->nlink = net->proc_net->nlink;
@@ -322,7 +324,6 @@ static int proc_tgid_net_getattr(struct mnt_idmap *idmap,
 const struct inode_operations proc_net_inode_operations = {
 	.lookup		= proc_tgid_net_lookup,
 	.getattr	= proc_tgid_net_getattr,
-	.setattr        = proc_setattr,
 };
 
 static int proc_tgid_net_readdir(struct file *file, struct dir_context *ctx)
@@ -352,12 +353,6 @@ static __net_init int proc_net_ns_init(struct net *net)
 	kgid_t gid;
 	int err;
 
-	/*
-	 * This PDE acts only as an anchor for /proc/${pid}/net hierarchy.
-	 * Corresponding inode (PDE(inode) == net->proc_net) is never
-	 * instantiated therefore blanket zeroing is fine.
-	 * net->proc_net_stat inode is instantiated normally.
-	 */
 	err = -ENOMEM;
 	netd = kmem_cache_zalloc(proc_dir_entry_cache, GFP_KERNEL);
 	if (!netd)

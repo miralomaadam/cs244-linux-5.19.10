@@ -173,7 +173,7 @@ static void mlxsw_sp_rx_no_mark_listener(struct sk_buff *skb, u16 local_port,
 	if (err)
 		return;
 
-	napi_gro_receive(mlxsw_skb_cb(skb)->rx_md_info.napi, skb);
+	netif_receive_skb(skb);
 }
 
 static void mlxsw_sp_rx_mark_listener(struct sk_buff *skb, u16 local_port,
@@ -510,9 +510,6 @@ mlxsw_sp_trap_policer_items_arr[] = {
 	{
 		.policer = MLXSW_SP_TRAP_POLICER(20, 10240, 4096),
 	},
-	{
-		.policer = MLXSW_SP_TRAP_POLICER(21, 128, 128),
-	},
 };
 
 static const struct mlxsw_sp_trap_group_item mlxsw_sp_trap_group_items_arr[] = {
@@ -630,11 +627,6 @@ static const struct mlxsw_sp_trap_group_item mlxsw_sp_trap_group_items_arr[] = {
 		.group = DEVLINK_TRAP_GROUP_GENERIC(ACL_TRAP, 18),
 		.hw_group_id = MLXSW_REG_HTGT_TRAP_GROUP_SP_FLOW_LOGGING,
 		.priority = 4,
-	},
-	{
-		.group = DEVLINK_TRAP_GROUP_GENERIC(EAPOL, 21),
-		.hw_group_id = MLXSW_REG_HTGT_TRAP_GROUP_SP_EAPOL,
-		.priority = 5,
 	},
 };
 
@@ -959,18 +951,18 @@ static const struct mlxsw_sp_trap_item mlxsw_sp_trap_items_arr[] = {
 	},
 	{
 		.trap = MLXSW_SP_TRAP_CONTROL(ARP_REQUEST, NEIGH_DISCOVERY,
-					      TRAP),
+					      MIRROR),
 		.listeners_arr = {
-			MLXSW_SP_RXL_NO_MARK(ARPBC, NEIGH_DISCOVERY,
-					     TRAP_TO_CPU, false),
+			MLXSW_SP_RXL_MARK(ARPBC, NEIGH_DISCOVERY, MIRROR_TO_CPU,
+					  false),
 		},
 	},
 	{
 		.trap = MLXSW_SP_TRAP_CONTROL(ARP_RESPONSE, NEIGH_DISCOVERY,
-					      TRAP),
+					      MIRROR),
 		.listeners_arr = {
-			MLXSW_SP_RXL_NO_MARK(ARPUC, NEIGH_DISCOVERY,
-					     TRAP_TO_CPU, false),
+			MLXSW_SP_RXL_MARK(ARPUC, NEIGH_DISCOVERY, MIRROR_TO_CPU,
+					  false),
 		},
 	},
 	{
@@ -1168,23 +1160,6 @@ static const struct mlxsw_sp_trap_item mlxsw_sp_trap_items_arr[] = {
 			MLXSW_SP_RXL_DISCARD(ROUTER3, L3_DISCARDS),
 		},
 	},
-	{
-		.trap = MLXSW_SP_TRAP_CONTROL(EAPOL, EAPOL, TRAP),
-		.listeners_arr = {
-			MLXSW_SP_RXL_NO_MARK(EAPOL, EAPOL, TRAP_TO_CPU, true),
-		},
-	},
-	{
-		.trap = MLXSW_SP_TRAP_DROP(LOCKED_PORT, L2_DROPS),
-		.listeners_arr = {
-			MLXSW_RXL_DIS(mlxsw_sp_rx_drop_listener, FDB_MISS,
-				      TRAP_EXCEPTION_TO_CPU, false,
-				      SP_L2_DISCARDS, DISCARD, SP_L2_DISCARDS),
-			MLXSW_RXL_DIS(mlxsw_sp_rx_drop_listener, FDB_MISMATCH,
-				      TRAP_EXCEPTION_TO_CPU, false,
-				      SP_L2_DISCARDS, DISCARD, SP_L2_DISCARDS),
-		},
-	},
 };
 
 static struct mlxsw_sp_trap_policer_item *
@@ -1323,8 +1298,8 @@ static int mlxsw_sp_trap_policers_init(struct mlxsw_sp *mlxsw_sp)
 
 	for (i = 0; i < trap->policers_count; i++) {
 		policer_item = &trap->policer_items_arr[i];
-		err = devl_trap_policers_register(devlink,
-						  &policer_item->policer, 1);
+		err = devlink_trap_policers_register(devlink,
+						     &policer_item->policer, 1);
 		if (err)
 			goto err_trap_policer_register;
 	}
@@ -1334,8 +1309,8 @@ static int mlxsw_sp_trap_policers_init(struct mlxsw_sp *mlxsw_sp)
 err_trap_policer_register:
 	for (i--; i >= 0; i--) {
 		policer_item = &trap->policer_items_arr[i];
-		devl_trap_policers_unregister(devlink,
-					      &policer_item->policer, 1);
+		devlink_trap_policers_unregister(devlink,
+						 &policer_item->policer, 1);
 	}
 	mlxsw_sp_trap_policer_items_arr_fini(mlxsw_sp);
 	return err;
@@ -1350,8 +1325,8 @@ static void mlxsw_sp_trap_policers_fini(struct mlxsw_sp *mlxsw_sp)
 
 	for (i = trap->policers_count - 1; i >= 0; i--) {
 		policer_item = &trap->policer_items_arr[i];
-		devl_trap_policers_unregister(devlink,
-					      &policer_item->policer, 1);
+		devlink_trap_policers_unregister(devlink,
+						 &policer_item->policer, 1);
 	}
 	mlxsw_sp_trap_policer_items_arr_fini(mlxsw_sp);
 }
@@ -1406,7 +1381,8 @@ static int mlxsw_sp_trap_groups_init(struct mlxsw_sp *mlxsw_sp)
 
 	for (i = 0; i < trap->groups_count; i++) {
 		group_item = &trap->group_items_arr[i];
-		err = devl_trap_groups_register(devlink, &group_item->group, 1);
+		err = devlink_trap_groups_register(devlink, &group_item->group,
+						   1);
 		if (err)
 			goto err_trap_group_register;
 	}
@@ -1416,7 +1392,7 @@ static int mlxsw_sp_trap_groups_init(struct mlxsw_sp *mlxsw_sp)
 err_trap_group_register:
 	for (i--; i >= 0; i--) {
 		group_item = &trap->group_items_arr[i];
-		devl_trap_groups_unregister(devlink, &group_item->group, 1);
+		devlink_trap_groups_unregister(devlink, &group_item->group, 1);
 	}
 	mlxsw_sp_trap_group_items_arr_fini(mlxsw_sp);
 	return err;
@@ -1432,7 +1408,7 @@ static void mlxsw_sp_trap_groups_fini(struct mlxsw_sp *mlxsw_sp)
 		const struct mlxsw_sp_trap_group_item *group_item;
 
 		group_item = &trap->group_items_arr[i];
-		devl_trap_groups_unregister(devlink, &group_item->group, 1);
+		devlink_trap_groups_unregister(devlink, &group_item->group, 1);
 	}
 	mlxsw_sp_trap_group_items_arr_fini(mlxsw_sp);
 }
@@ -1493,8 +1469,8 @@ static int mlxsw_sp_traps_init(struct mlxsw_sp *mlxsw_sp)
 
 	for (i = 0; i < trap->traps_count; i++) {
 		trap_item = &trap->trap_items_arr[i];
-		err = devl_traps_register(devlink, &trap_item->trap, 1,
-					  mlxsw_sp);
+		err = devlink_traps_register(devlink, &trap_item->trap, 1,
+					     mlxsw_sp);
 		if (err)
 			goto err_trap_register;
 	}
@@ -1504,7 +1480,7 @@ static int mlxsw_sp_traps_init(struct mlxsw_sp *mlxsw_sp)
 err_trap_register:
 	for (i--; i >= 0; i--) {
 		trap_item = &trap->trap_items_arr[i];
-		devl_traps_unregister(devlink, &trap_item->trap, 1);
+		devlink_traps_unregister(devlink, &trap_item->trap, 1);
 	}
 	mlxsw_sp_trap_items_arr_fini(mlxsw_sp);
 	return err;
@@ -1520,7 +1496,7 @@ static void mlxsw_sp_traps_fini(struct mlxsw_sp *mlxsw_sp)
 		const struct mlxsw_sp_trap_item *trap_item;
 
 		trap_item = &trap->trap_items_arr[i];
-		devl_traps_unregister(devlink, &trap_item->trap, 1);
+		devlink_traps_unregister(devlink, &trap_item->trap, 1);
 	}
 	mlxsw_sp_trap_items_arr_fini(mlxsw_sp);
 }

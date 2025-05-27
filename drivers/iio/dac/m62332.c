@@ -176,7 +176,8 @@ static const struct iio_chan_spec m62332_channels[M62332_CHANNELS] = {
 	M62332_CHANNEL(1)
 };
 
-static int m62332_probe(struct i2c_client *client)
+static int m62332_probe(struct i2c_client *client,
+			const struct i2c_device_id *id)
 {
 	struct m62332_data *data;
 	struct iio_dev *indio_dev;
@@ -201,7 +202,7 @@ static int m62332_probe(struct i2c_client *client)
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->info = &m62332_info;
 
-	ret = iio_map_array_register(indio_dev, dev_get_platdata(&client->dev));
+	ret = iio_map_array_register(indio_dev, client->dev.platform_data);
 	if (ret < 0)
 		return ret;
 
@@ -217,7 +218,7 @@ err:
 	return ret;
 }
 
-static void m62332_remove(struct i2c_client *client)
+static int m62332_remove(struct i2c_client *client)
 {
 	struct iio_dev *indio_dev = i2c_get_clientdata(client);
 
@@ -225,6 +226,8 @@ static void m62332_remove(struct i2c_client *client)
 	iio_map_array_unregister(indio_dev);
 	m62332_set_value(indio_dev, 0, 0);
 	m62332_set_value(indio_dev, 0, 1);
+
+	return 0;
 }
 
 static const struct i2c_device_id m62332_id[] = {

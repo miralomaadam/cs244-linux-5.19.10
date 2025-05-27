@@ -9,7 +9,6 @@
 #include <linux/kernel.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
-#include <linux/types.h>
 #include <linux/spi/spi.h>
 
 #include <linux/iio/buffer.h>
@@ -66,7 +65,7 @@ struct bma220_data {
 	struct {
 		s8 chans[3];
 		/* Ensure timestamp is naturally aligned. */
-		aligned_s64 timestamp;
+		s64 timestamp __aligned(8);
 	} scan;
 	u8 tx_buf[2] __aligned(IIO_DMA_MINALIGN);
 };
@@ -290,20 +289,20 @@ static int bma220_probe(struct spi_device *spi)
 	return devm_iio_device_register(&spi->dev, indio_dev);
 }
 
-static int bma220_suspend(struct device *dev)
+static __maybe_unused int bma220_suspend(struct device *dev)
 {
 	struct spi_device *spi = to_spi_device(dev);
 
 	return bma220_power(spi, false);
 }
 
-static int bma220_resume(struct device *dev)
+static __maybe_unused int bma220_resume(struct device *dev)
 {
 	struct spi_device *spi = to_spi_device(dev);
 
 	return bma220_power(spi, true);
 }
-static DEFINE_SIMPLE_DEV_PM_OPS(bma220_pm_ops, bma220_suspend, bma220_resume);
+static SIMPLE_DEV_PM_OPS(bma220_pm_ops, bma220_suspend, bma220_resume);
 
 static const struct spi_device_id bma220_spi_id[] = {
 	{"bma220", 0},
@@ -319,7 +318,7 @@ MODULE_DEVICE_TABLE(spi, bma220_spi_id);
 static struct spi_driver bma220_driver = {
 	.driver = {
 		.name = "bma220_spi",
-		.pm = pm_sleep_ptr(&bma220_pm_ops),
+		.pm = &bma220_pm_ops,
 		.acpi_match_table = bma220_acpi_id,
 	},
 	.probe =            bma220_probe,

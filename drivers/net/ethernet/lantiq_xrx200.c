@@ -419,7 +419,7 @@ xrx200_change_mtu(struct net_device *net_dev, int new_mtu)
 	int curr_desc;
 	int ret = 0;
 
-	WRITE_ONCE(net_dev->mtu, new_mtu);
+	net_dev->mtu = new_mtu;
 	priv->rx_buf_size = xrx200_buffer_size(new_mtu);
 	priv->rx_skb_size = xrx200_skb_size(priv->rx_buf_size);
 
@@ -440,7 +440,7 @@ xrx200_change_mtu(struct net_device *net_dev, int new_mtu)
 		buff = ch_rx->rx_buff[ch_rx->dma.desc];
 		ret = xrx200_alloc_buf(ch_rx, netdev_alloc_frag);
 		if (ret) {
-			WRITE_ONCE(net_dev->mtu, old_mtu);
+			net_dev->mtu = old_mtu;
 			priv->rx_buf_size = xrx200_buffer_size(old_mtu);
 			priv->rx_skb_size = xrx200_skb_size(priv->rx_buf_size);
 			break;
@@ -620,7 +620,8 @@ static int xrx200_probe(struct platform_device *pdev)
 			 PMAC_HD_CTL);
 
 	/* setup NAPI */
-	netif_napi_add(net_dev, &priv->chan_rx.napi, xrx200_poll_rx);
+	netif_napi_add(net_dev, &priv->chan_rx.napi, xrx200_poll_rx,
+		       NAPI_POLL_WEIGHT);
 	netif_napi_add_tx(net_dev, &priv->chan_tx.napi,
 			  xrx200_tx_housekeeping);
 
@@ -641,7 +642,7 @@ err_uninit_dma:
 	return err;
 }
 
-static void xrx200_remove(struct platform_device *pdev)
+static int xrx200_remove(struct platform_device *pdev)
 {
 	struct xrx200_priv *priv = platform_get_drvdata(pdev);
 	struct net_device *net_dev = priv->net_dev;
@@ -659,6 +660,8 @@ static void xrx200_remove(struct platform_device *pdev)
 
 	/* shut down hardware */
 	xrx200_hw_cleanup(priv);
+
+	return 0;
 }
 
 static const struct of_device_id xrx200_match[] = {

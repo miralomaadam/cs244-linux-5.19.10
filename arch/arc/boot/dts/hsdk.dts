@@ -205,6 +205,7 @@
 		};
 
 		gmac: ethernet@8000 {
+			#interrupt-cells = <1>;
 			compatible = "snps,dwmac";
 			reg = <0x8000 0x2000>;
 			interrupts = <10>;
@@ -233,7 +234,7 @@
 			};
 		};
 
-		usb@60000 {
+		ohci@60000 {
 			compatible = "snps,hsdk-v1.0-ohci", "generic-ohci";
 			reg = <0x60000 0x100>;
 			interrupts = <15>;
@@ -241,7 +242,7 @@
 			dma-coherent;
 		};
 
-		usb@40000 {
+		ehci@40000 {
 			compatible = "snps,hsdk-v1.0-ehci", "generic-ehci";
 			reg = <0x40000 0x100>;
 			interrupts = <15>;
@@ -308,7 +309,7 @@
 				compatible = "snps,dw-apb-gpio-port";
 				gpio-controller;
 				#gpio-cells = <2>;
-				ngpios = <24>;
+				snps,nr-gpios = <24>;
 				reg = <0>;
 			};
 		};

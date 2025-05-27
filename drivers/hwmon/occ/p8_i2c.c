@@ -8,7 +8,7 @@
 #include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/sched.h>
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 
 #include "common.h"
 
@@ -227,11 +227,13 @@ static int p8_i2c_occ_probe(struct i2c_client *client)
 	return occ_setup(occ);
 }
 
-static void p8_i2c_occ_remove(struct i2c_client *client)
+static int p8_i2c_occ_remove(struct i2c_client *client)
 {
 	struct occ *occ = dev_get_drvdata(&client->dev);
 
 	occ_shutdown(occ);
+
+	return 0;
 }
 
 static const struct of_device_id p8_i2c_occ_of_match[] = {
@@ -241,11 +243,12 @@ static const struct of_device_id p8_i2c_occ_of_match[] = {
 MODULE_DEVICE_TABLE(of, p8_i2c_occ_of_match);
 
 static struct i2c_driver p8_i2c_occ_driver = {
+	.class = I2C_CLASS_HWMON,
 	.driver = {
 		.name = "occ-hwmon",
 		.of_match_table = p8_i2c_occ_of_match,
 	},
-	.probe = p8_i2c_occ_probe,
+	.probe_new = p8_i2c_occ_probe,
 	.remove = p8_i2c_occ_remove,
 };
 

@@ -51,6 +51,7 @@
 #include <linux/mutex.h>
 #include <linux/netdevice.h>
 #include <linux/pci.h>
+#include <linux/aer.h>
 #include <linux/rtnetlink.h>
 #include <linux/sched.h>
 #include <linux/seq_file.h>
@@ -1175,7 +1176,7 @@ static u16 cxgb_select_queue(struct net_device *dev, struct sk_buff *skb,
 		txq = netdev_pick_tx(dev, skb, sb_dev);
 		if (xfrm_offload(skb) || is_ptp_enabled(skb, dev) ||
 		    skb->encapsulation ||
-		    tls_is_skb_tx_device_offloaded(skb) ||
+		    cxgb4_is_ktls_skb(skb) ||
 		    (proto != IPPROTO_TCP && proto != IPPROTO_UDP))
 			txq = txq % pi->nqsets;
 
@@ -1799,10 +1800,7 @@ void cxgb4_remove_tid(struct tid_info *t, unsigned int chan, unsigned int tid,
 	struct adapter *adap = container_of(t, struct adapter, tids);
 	struct sk_buff *skb;
 
-	if (tid_out_of_range(&adap->tids, tid)) {
-		dev_err(adap->pdev_dev, "tid %d out of range\n", tid);
-		return;
-	}
+	WARN_ON(tid_out_of_range(&adap->tids, tid));
 
 	if (t->tid_tab[tid - adap->tids.tid_base]) {
 		t->tid_tab[tid - adap->tids.tid_base] = NULL;
@@ -2190,6 +2188,18 @@ void cxgb4_get_tcp_stats(struct pci_dev *pdev, struct tp_tcp_stats *v4,
 	spin_unlock(&adap->stats_lock);
 }
 EXPORT_SYMBOL(cxgb4_get_tcp_stats);
+
+void cxgb4_iscsi_init(struct net_device *dev, unsigned int tag_mask,
+		      const unsigned int *pgsz_order)
+{
+	struct adapter *adap = netdev2adap(dev);
+
+	t4_write_reg(adap, ULP_RX_ISCSI_TAGMASK_A, tag_mask);
+	t4_write_reg(adap, ULP_RX_ISCSI_PSZ_A, HPZ0_V(pgsz_order[0]) |
+		     HPZ1_V(pgsz_order[1]) | HPZ2_V(pgsz_order[2]) |
+		     HPZ3_V(pgsz_order[3]));
+}
+EXPORT_SYMBOL(cxgb4_iscsi_init);
 
 int cxgb4_flush_eq_cache(struct net_device *dev)
 {
@@ -3171,7 +3181,7 @@ static int cxgb_change_mtu(struct net_device *dev, int new_mtu)
 	ret = t4_set_rxmode(pi->adapter, pi->adapter->mbox, pi->viid,
 			    pi->viid_mirror, new_mtu, -1, -1, -1, -1, true);
 	if (!ret)
-		WRITE_ONCE(dev->mtu, new_mtu);
+		dev->mtu = new_mtu;
 	return ret;
 }
 
@@ -3237,7 +3247,7 @@ static int cxgb4_mgmt_set_vf_mac(struct net_device *dev, int vf, u8 *mac)
 
 	dev_info(pi->adapter->pdev_dev,
 		 "Setting MAC %pM on VF %d\n", mac, vf);
-	ret = t4_set_vf_mac_acl(adap, vf + 1, pi->lport, 1, mac);
+	ret = t4_set_vf_mac_acl(adap, vf + 1, 1, mac);
 	if (!ret)
 		ether_addr_copy(adap->vfinfo[vf].vf_mac_addr, mac);
 	return ret;
@@ -3893,8 +3903,8 @@ static void cxgb4_mgmt_get_drvinfo(struct net_device *dev,
 {
 	struct adapter *adapter = netdev2adap(dev);
 
-	strscpy(info->driver, cxgb4_driver_name, sizeof(info->driver));
-	strscpy(info->bus_info, pci_name(adapter->pdev),
+	strlcpy(info->driver, cxgb4_driver_name, sizeof(info->driver));
+	strlcpy(info->bus_info, pci_name(adapter->pdev),
 		sizeof(info->bus_info));
 }
 
@@ -5037,24 +5047,28 @@ static int adap_init0(struct adapter *adap, int vpd_skip)
 	/* Allocate the memory for the vaious egress queue bitmaps
 	 * ie starving_fl, txq_maperr and blocked_fl.
 	 */
-	adap->sge.starving_fl = bitmap_zalloc(adap->sge.egr_sz, GFP_KERNEL);
+	adap->sge.starving_fl =	kcalloc(BITS_TO_LONGS(adap->sge.egr_sz),
+					sizeof(long), GFP_KERNEL);
 	if (!adap->sge.starving_fl) {
 		ret = -ENOMEM;
 		goto bye;
 	}
 
-	adap->sge.txq_maperr = bitmap_zalloc(adap->sge.egr_sz, GFP_KERNEL);
+	adap->sge.txq_maperr = kcalloc(BITS_TO_LONGS(adap->sge.egr_sz),
+				       sizeof(long), GFP_KERNEL);
 	if (!adap->sge.txq_maperr) {
 		ret = -ENOMEM;
 		goto bye;
 	}
 
 #ifdef CONFIG_DEBUG_FS
-	adap->sge.blocked_fl = bitmap_zalloc(adap->sge.egr_sz, GFP_KERNEL);
+	adap->sge.blocked_fl = kcalloc(BITS_TO_LONGS(adap->sge.egr_sz),
+				       sizeof(long), GFP_KERNEL);
 	if (!adap->sge.blocked_fl) {
 		ret = -ENOMEM;
 		goto bye;
 	}
+	bitmap_zero(adap->sge.blocked_fl, adap->sge.egr_sz);
 #endif
 
 	params[0] = FW_PARAM_PFVF(CLIP_START);
@@ -5403,10 +5417,10 @@ bye:
 	adap_free_hma_mem(adap);
 	kfree(adap->sge.egr_map);
 	kfree(adap->sge.ingr_map);
-	bitmap_free(adap->sge.starving_fl);
-	bitmap_free(adap->sge.txq_maperr);
+	kfree(adap->sge.starving_fl);
+	kfree(adap->sge.txq_maperr);
 #ifdef CONFIG_DEBUG_FS
-	bitmap_free(adap->sge.blocked_fl);
+	kfree(adap->sge.blocked_fl);
 #endif
 	if (ret != -ETIMEDOUT && ret != -EIO)
 		t4_fw_bye(adap, adap->mbox);
@@ -5840,7 +5854,8 @@ static int alloc_msix_info(struct adapter *adap, u32 num_vec)
 	if (!msix_info)
 		return -ENOMEM;
 
-	adap->msix_bmap.msix_bmap = bitmap_zalloc(num_vec, GFP_KERNEL);
+	adap->msix_bmap.msix_bmap = kcalloc(BITS_TO_LONGS(num_vec),
+					    sizeof(long), GFP_KERNEL);
 	if (!adap->msix_bmap.msix_bmap) {
 		kfree(msix_info);
 		return -ENOMEM;
@@ -5855,7 +5870,7 @@ static int alloc_msix_info(struct adapter *adap, u32 num_vec)
 
 static void free_msix_info(struct adapter *adap)
 {
-	bitmap_free(adap->msix_bmap.msix_bmap);
+	kfree(adap->msix_bmap.msix_bmap);
 	kfree(adap->msix_info);
 }
 
@@ -6174,10 +6189,10 @@ static void free_some_resources(struct adapter *adapter)
 	cxgb4_cleanup_ethtool_filters(adapter);
 	kfree(adapter->sge.egr_map);
 	kfree(adapter->sge.ingr_map);
-	bitmap_free(adapter->sge.starving_fl);
-	bitmap_free(adapter->sge.txq_maperr);
+	kfree(adapter->sge.starving_fl);
+	kfree(adapter->sge.txq_maperr);
 #ifdef CONFIG_DEBUG_FS
-	bitmap_free(adapter->sge.blocked_fl);
+	kfree(adapter->sge.blocked_fl);
 #endif
 	disable_msi(adapter);
 
@@ -6480,21 +6495,21 @@ static const struct tlsdev_ops cxgb4_ktls_ops = {
 
 #if IS_ENABLED(CONFIG_CHELSIO_IPSEC_INLINE)
 
-static int cxgb4_xfrm_add_state(struct xfrm_state *x,
-				struct netlink_ext_ack *extack)
+static int cxgb4_xfrm_add_state(struct xfrm_state *x)
 {
 	struct adapter *adap = netdev2adap(x->xso.dev);
 	int ret;
 
 	if (!mutex_trylock(&uld_mutex)) {
-		NL_SET_ERR_MSG_MOD(extack, "crypto uld critical resource is under use");
+		dev_dbg(adap->pdev_dev,
+			"crypto uld critical resource is under use\n");
 		return -EBUSY;
 	}
 	ret = chcr_offload_state(adap, CXGB4_XFRMDEV_OPS);
 	if (ret)
 		goto out_unlock;
 
-	ret = adap->uld[CXGB4_ULD_IPSEC].xfrmdev_ops->xdo_dev_state_add(x, extack);
+	ret = adap->uld[CXGB4_ULD_IPSEC].xfrmdev_ops->xdo_dev_state_add(x);
 
 out_unlock:
 	mutex_unlock(&uld_mutex);
@@ -6538,12 +6553,29 @@ out_unlock:
 	mutex_unlock(&uld_mutex);
 }
 
+static bool cxgb4_ipsec_offload_ok(struct sk_buff *skb, struct xfrm_state *x)
+{
+	struct adapter *adap = netdev2adap(x->xso.dev);
+	bool ret = false;
+
+	if (!mutex_trylock(&uld_mutex)) {
+		dev_dbg(adap->pdev_dev,
+			"crypto uld critical resource is under use\n");
+		return ret;
+	}
+	if (chcr_offload_state(adap, CXGB4_XFRMDEV_OPS))
+		goto out_unlock;
+
+	ret = adap->uld[CXGB4_ULD_IPSEC].xfrmdev_ops->xdo_dev_offload_ok(skb, x);
+
+out_unlock:
+	mutex_unlock(&uld_mutex);
+	return ret;
+}
+
 static void cxgb4_advance_esn_state(struct xfrm_state *x)
 {
 	struct adapter *adap = netdev2adap(x->xso.dev);
-
-	if (x->xso.dir != XFRM_DEV_OFFLOAD_IN)
-		return;
 
 	if (!mutex_trylock(&uld_mutex)) {
 		dev_dbg(adap->pdev_dev,
@@ -6563,6 +6595,7 @@ static const struct xfrmdev_ops cxgb4_xfrmdev_ops = {
 	.xdo_dev_state_add      = cxgb4_xfrm_add_state,
 	.xdo_dev_state_delete   = cxgb4_xfrm_del_state,
 	.xdo_dev_state_free     = cxgb4_xfrm_free_state,
+	.xdo_dev_offload_ok     = cxgb4_ipsec_offload_ok,
 	.xdo_dev_state_advance_esn = cxgb4_advance_esn_state,
 };
 
@@ -6659,6 +6692,7 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		goto out_free_adapter;
 	}
 
+	pci_enable_pcie_error_reporting(pdev);
 	pci_set_master(pdev);
 	pci_save_state(pdev);
 	adap_idx++;
@@ -7063,6 +7097,7 @@ fw_attach_fail:
  out_unmap_bar0:
 	iounmap(regs);
  out_disable_device:
+	pci_disable_pcie_error_reporting(pdev);
 	pci_disable_device(pdev);
  out_release_regions:
 	pci_release_regions(pdev);
@@ -7141,6 +7176,7 @@ static void remove_one(struct pci_dev *pdev)
 	}
 #endif
 	iounmap(adapter->regs);
+	pci_disable_pcie_error_reporting(pdev);
 	if ((adapter->flags & CXGB4_DEV_ENABLED)) {
 		pci_disable_device(pdev);
 		adapter->flags &= ~CXGB4_DEV_ENABLED;

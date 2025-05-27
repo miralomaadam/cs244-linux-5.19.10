@@ -1145,7 +1145,7 @@ static void isp1760_udc_disconnect(struct isp1760_udc *udc)
 	if (udc->driver->disconnect)
 		udc->driver->disconnect(&udc->gadget);
 
-	timer_delete(&udc->vbus_timer);
+	del_timer(&udc->vbus_timer);
 
 	/* TODO Reset all endpoints ? */
 }
@@ -1314,7 +1314,7 @@ static int isp1760_udc_stop(struct usb_gadget *gadget)
 
 	dev_dbg(udc->isp->dev, "%s\n", __func__);
 
-	timer_delete_sync(&udc->vbus_timer);
+	del_timer_sync(&udc->vbus_timer);
 
 	isp1760_reg_write(udc->regs, mode_reg, 0);
 

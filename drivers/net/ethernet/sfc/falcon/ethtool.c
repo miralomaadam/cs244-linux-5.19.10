@@ -162,9 +162,9 @@ static void ef4_ethtool_get_drvinfo(struct net_device *net_dev,
 {
 	struct ef4_nic *efx = netdev_priv(net_dev);
 
-	strscpy(info->driver, KBUILD_MODNAME, sizeof(info->driver));
-	strscpy(info->version, EF4_DRIVER_VERSION, sizeof(info->version));
-	strscpy(info->bus_info, pci_name(efx->pci_dev), sizeof(info->bus_info));
+	strlcpy(info->driver, KBUILD_MODNAME, sizeof(info->driver));
+	strlcpy(info->version, EF4_DRIVER_VERSION, sizeof(info->version));
+	strlcpy(info->bus_info, pci_name(efx->pci_dev), sizeof(info->bus_info));
 }
 
 static int ef4_ethtool_get_regs_len(struct net_device *net_dev)
@@ -353,7 +353,7 @@ static int ef4_ethtool_fill_self_tests(struct ef4_nic *efx,
 	return n;
 }
 
-static size_t ef4_describe_per_queue_stats(struct ef4_nic *efx, u8 **strings)
+static size_t ef4_describe_per_queue_stats(struct ef4_nic *efx, u8 *strings)
 {
 	size_t n_stats = 0;
 	struct ef4_channel *channel;
@@ -361,22 +361,24 @@ static size_t ef4_describe_per_queue_stats(struct ef4_nic *efx, u8 **strings)
 	ef4_for_each_channel(channel, efx) {
 		if (ef4_channel_has_tx_queues(channel)) {
 			n_stats++;
-			if (!strings)
-				continue;
+			if (strings != NULL) {
+				snprintf(strings, ETH_GSTRING_LEN,
+					 "tx-%u.tx_packets",
+					 channel->tx_queue[0].queue /
+					 EF4_TXQ_TYPES);
 
-			ethtool_sprintf(strings, "tx-%u.tx_packets",
-					channel->tx_queue[0].queue /
-						EF4_TXQ_TYPES);
+				strings += ETH_GSTRING_LEN;
+			}
 		}
 	}
 	ef4_for_each_channel(channel, efx) {
 		if (ef4_channel_has_rx_queue(channel)) {
 			n_stats++;
-			if (!strings)
-				continue;
-
-			ethtool_sprintf(strings, "rx-%d.rx_packets",
-					channel->channel);
+			if (strings != NULL) {
+				snprintf(strings, ETH_GSTRING_LEN,
+					 "rx-%d.rx_packets", channel->channel);
+				strings += ETH_GSTRING_LEN;
+			}
 		}
 	}
 	return n_stats;
@@ -407,10 +409,14 @@ static void ef4_ethtool_get_strings(struct net_device *net_dev,
 
 	switch (string_set) {
 	case ETH_SS_STATS:
-		efx->type->describe_stats(efx, &strings);
+		strings += (efx->type->describe_stats(efx, strings) *
+			    ETH_GSTRING_LEN);
 		for (i = 0; i < EF4_ETHTOOL_SW_STAT_COUNT; i++)
-			ethtool_puts(&strings, ef4_sw_stat_desc[i].name);
-		ef4_describe_per_queue_stats(efx, &strings);
+			strlcpy(strings + i * ETH_GSTRING_LEN,
+				ef4_sw_stat_desc[i].name, ETH_GSTRING_LEN);
+		strings += EF4_ETHTOOL_SW_STAT_COUNT * ETH_GSTRING_LEN;
+		strings += (ef4_describe_per_queue_stats(efx, strings) *
+			    ETH_GSTRING_LEN);
 		break;
 	case ETH_SS_TEST:
 		ef4_ethtool_fill_self_tests(efx, NULL, strings, NULL);
@@ -1251,33 +1257,31 @@ static u32 ef4_ethtool_get_rxfh_indir_size(struct net_device *net_dev)
 		0 : ARRAY_SIZE(efx->rx_indir_table));
 }
 
-static int ef4_ethtool_get_rxfh(struct net_device *net_dev,
-				struct ethtool_rxfh_param *rxfh)
+static int ef4_ethtool_get_rxfh(struct net_device *net_dev, u32 *indir, u8 *key,
+				u8 *hfunc)
 {
 	struct ef4_nic *efx = netdev_priv(net_dev);
 
-	rxfh->hfunc = ETH_RSS_HASH_TOP;
-	if (rxfh->indir)
-		memcpy(rxfh->indir, efx->rx_indir_table,
-		       sizeof(efx->rx_indir_table));
+	if (hfunc)
+		*hfunc = ETH_RSS_HASH_TOP;
+	if (indir)
+		memcpy(indir, efx->rx_indir_table, sizeof(efx->rx_indir_table));
 	return 0;
 }
 
-static int ef4_ethtool_set_rxfh(struct net_device *net_dev,
-				struct ethtool_rxfh_param *rxfh,
-				struct netlink_ext_ack *extack)
+static int ef4_ethtool_set_rxfh(struct net_device *net_dev, const u32 *indir,
+				const u8 *key, const u8 hfunc)
 {
 	struct ef4_nic *efx = netdev_priv(net_dev);
 
 	/* We do not allow change in unsupported parameters */
-	if (rxfh->key ||
-	    (rxfh->hfunc != ETH_RSS_HASH_NO_CHANGE &&
-	     rxfh->hfunc != ETH_RSS_HASH_TOP))
+	if (key ||
+	    (hfunc != ETH_RSS_HASH_NO_CHANGE && hfunc != ETH_RSS_HASH_TOP))
 		return -EOPNOTSUPP;
-	if (!rxfh->indir)
+	if (!indir)
 		return 0;
 
-	return efx->type->rx_push_rss_config(efx, true, rxfh->indir);
+	return efx->type->rx_push_rss_config(efx, true, indir);
 }
 
 static int ef4_ethtool_get_module_eeprom(struct net_device *net_dev,

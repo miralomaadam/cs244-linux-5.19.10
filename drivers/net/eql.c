@@ -225,7 +225,7 @@ static void eql_kill_one_slave(slave_queue_t *queue, slave_t *slave)
 	list_del(&slave->list);
 	queue->num_slaves--;
 	slave->dev->flags &= ~IFF_SLAVE;
-	netdev_put(slave->dev, &slave->dev_tracker);
+	dev_put_track(slave->dev, &slave->dev_tracker);
 	kfree(slave);
 }
 
@@ -254,7 +254,7 @@ static int eql_close(struct net_device *dev)
 	 *	at the data structure it scans every so often...
 	 */
 
-	timer_delete_sync(&eql->timer);
+	del_timer_sync(&eql->timer);
 
 	eql_kill_slave_queue(&eql->queue);
 
@@ -399,7 +399,7 @@ static int __eql_insert_slave(slave_queue_t *queue, slave_t *slave)
 		if (duplicate_slave)
 			eql_kill_one_slave(queue, duplicate_slave);
 
-		netdev_hold(slave->dev, &slave->dev_tracker, GFP_ATOMIC);
+		dev_hold_track(slave->dev, &slave->dev_tracker, GFP_ATOMIC);
 		list_add(&slave->list, &queue->all_slaves);
 		queue->num_slaves++;
 		slave->dev->flags |= IFF_SLAVE;
@@ -607,5 +607,4 @@ static void __exit eql_cleanup_module(void)
 
 module_init(eql_init_module);
 module_exit(eql_cleanup_module);
-MODULE_DESCRIPTION("Equalizer Load-balancer for serial network interfaces");
 MODULE_LICENSE("GPL");

@@ -167,7 +167,7 @@ static void pcan_start_led_timer(struct pcan_pccard *card)
  */
 static void pcan_stop_led_timer(struct pcan_pccard *card)
 {
-	timer_delete_sync(&card->led_timer);
+	del_timer_sync(&card->led_timer);
 }
 
 /*
@@ -478,7 +478,7 @@ static void pcan_free_channels(struct pcan_pccard *card)
 		if (!netdev)
 			continue;
 
-		strscpy(name, netdev->name, IFNAMSIZ);
+		strlcpy(name, netdev->name, IFNAMSIZ);
 
 		unregister_sja1000dev(netdev);
 

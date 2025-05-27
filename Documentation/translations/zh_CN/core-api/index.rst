@@ -28,7 +28,6 @@
    printk-basics
    printk-formats
    workqueue
-   watch_queue
    symbol-namespaces
 
 数据结构和低级实用程序
@@ -44,17 +43,17 @@
    assoc_array
    xarray
    rbtree
+
+Todolist:
+
+
+
    idr
    circular-buffers
    generic-radix-tree
    packing
+   bus-virt-phys-mapping
    this_cpu_ops
-   union_find
-
-=======
-
-Todolist:
-
    timekeeping
    errseq
 
@@ -102,7 +101,7 @@ Todolist:
 ========
 
 如何在内核中分配和使用内存。请注意，在
-:doc:`/mm/index` 中有更多的内存管理文档。
+:doc:`/vm/index` 中有更多的内存管理文档。
 
 .. toctree::
    :maxdepth: 1

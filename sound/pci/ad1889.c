@@ -626,7 +626,7 @@ snd_ad1889_proc_read(struct snd_info_entry *entry, struct snd_info_buffer *buffe
 
 	reg = ad1889_readw(chip, AD_DS_WSMC);
 	snd_iprintf(buffer, "Wave output: %s\n",
-			str_enabled_disabled(reg & AD_DS_WSMC_WAEN));
+			(reg & AD_DS_WSMC_WAEN) ? "enabled" : "disabled");
 	snd_iprintf(buffer, "Wave Channels: %s\n",
 			(reg & AD_DS_WSMC_WAST) ? "stereo" : "mono");
 	snd_iprintf(buffer, "Wave Quality: %d-bit linear\n",
@@ -642,7 +642,7 @@ snd_ad1889_proc_read(struct snd_info_entry *entry, struct snd_info_buffer *buffe
 				
 	
 	snd_iprintf(buffer, "Synthesis output: %s\n",
-			str_enabled_disabled(reg & AD_DS_WSMC_SYEN));
+			reg & AD_DS_WSMC_SYEN ? "enabled" : "disabled");
 	
 	/* SYRQ is at offset 4 */
 	tmp = (reg & AD_DS_WSMC_SYRQ) ?
@@ -654,7 +654,7 @@ snd_ad1889_proc_read(struct snd_info_entry *entry, struct snd_info_buffer *buffe
 
 	reg = ad1889_readw(chip, AD_DS_RAMC);
 	snd_iprintf(buffer, "ADC input: %s\n",
-			str_enabled_disabled(reg & AD_DS_RAMC_ADEN));
+			(reg & AD_DS_RAMC_ADEN) ? "enabled" : "disabled");
 	snd_iprintf(buffer, "ADC Channels: %s\n",
 			(reg & AD_DS_RAMC_ADST) ? "stereo" : "mono");
 	snd_iprintf(buffer, "ADC Quality: %d-bit linear\n",
@@ -669,7 +669,7 @@ snd_ad1889_proc_read(struct snd_info_entry *entry, struct snd_info_buffer *buffe
 			(reg & AD_DS_RAMC_ADST) ? "stereo" : "mono");
 	
 	snd_iprintf(buffer, "Resampler input: %s\n",
-			str_enabled_disabled(reg & AD_DS_RAMC_REEN));
+			reg & AD_DS_RAMC_REEN ? "enabled" : "disabled");
 			
 	/* RERQ is at offset 12 */
 	tmp = (reg & AD_DS_RAMC_RERQ) ?

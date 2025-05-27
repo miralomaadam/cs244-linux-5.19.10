@@ -290,11 +290,9 @@
 /* Auto-negotiation */
 #define XGBE_AN_MS_TIMEOUT		500
 #define XGBE_LINK_TIMEOUT		5
-#define XGBE_KR_TRAINING_WAIT_ITER	50
 
 #define XGBE_SGMII_AN_LINK_STATUS	BIT(1)
 #define XGBE_SGMII_AN_LINK_SPEED	(BIT(2) | BIT(3))
-#define XGBE_SGMII_AN_LINK_SPEED_10	0x00
 #define XGBE_SGMII_AN_LINK_SPEED_100	0x04
 #define XGBE_SGMII_AN_LINK_SPEED_1000	0x08
 #define XGBE_SGMII_AN_LINK_DUPLEX	BIT(4)
@@ -419,7 +417,7 @@ struct xgbe_rx_ring_data {
 
 /* Structure used to hold information related to the descriptor
  * and the packet associated with the descriptor (always use
- * the XGBE_GET_DESC_DATA macro to access this data from the ring)
+ * use the XGBE_GET_DESC_DATA macro to access this data from the ring)
  */
 struct xgbe_ring_data {
 	struct xgbe_ring_desc *rdesc;	/* Virtual address of descriptor */
@@ -495,7 +493,7 @@ struct xgbe_ring {
  * a DMA channel.
  */
 struct xgbe_channel {
-	char name[20];
+	char name[16];
 
 	/* Address of private data area for device */
 	struct xgbe_prv_data *pdata;
@@ -596,7 +594,6 @@ enum xgbe_mode {
 	XGBE_MODE_KX_2500,
 	XGBE_MODE_KR,
 	XGBE_MODE_X,
-	XGBE_MODE_SGMII_10,
 	XGBE_MODE_SGMII_100,
 	XGBE_MODE_SGMII_1000,
 	XGBE_MODE_SFI,
@@ -612,32 +609,6 @@ enum xgbe_mdio_mode {
 	XGBE_MDIO_MODE_NONE = 0,
 	XGBE_MDIO_MODE_CL22,
 	XGBE_MDIO_MODE_CL45,
-};
-
-enum xgbe_mb_cmd {
-	XGBE_MB_CMD_POWER_OFF = 0,
-	XGBE_MB_CMD_SET_1G,
-	XGBE_MB_CMD_SET_2_5G,
-	XGBE_MB_CMD_SET_10G_SFI,
-	XGBE_MB_CMD_SET_10G_KR,
-	XGBE_MB_CMD_RRC
-};
-
-enum xgbe_mb_subcmd {
-	XGBE_MB_SUBCMD_NONE = 0,
-	XGBE_MB_SUBCMD_RX_ADAP,
-
-	/* 10GbE SFP subcommands */
-	XGBE_MB_SUBCMD_ACTIVE = 0,
-	XGBE_MB_SUBCMD_PASSIVE_1M,
-	XGBE_MB_SUBCMD_PASSIVE_3M,
-	XGBE_MB_SUBCMD_PASSIVE_OTHER,
-
-	/* 1GbE Mode subcommands */
-	XGBE_MB_SUBCMD_10MBITS = 0,
-	XGBE_MB_SUBCMD_100MBITS,
-	XGBE_MB_SUBCMD_1G_SGMII,
-	XGBE_MB_SUBCMD_1G_KX
 };
 
 struct xgbe_phy {
@@ -777,11 +748,8 @@ struct xgbe_hw_if {
 
 	int (*set_ext_mii_mode)(struct xgbe_prv_data *, unsigned int,
 				enum xgbe_mdio_mode);
-	int (*read_ext_mii_regs_c22)(struct xgbe_prv_data *, int, int);
-	int (*write_ext_mii_regs_c22)(struct xgbe_prv_data *, int, int, u16);
-	int (*read_ext_mii_regs_c45)(struct xgbe_prv_data *, int, int, int);
-	int (*write_ext_mii_regs_c45)(struct xgbe_prv_data *, int, int, int,
-				      u16);
+	int (*read_ext_mii_regs)(struct xgbe_prv_data *, int, int);
+	int (*write_ext_mii_regs)(struct xgbe_prv_data *, int, int, u16);
 
 	int (*set_gpio)(struct xgbe_prv_data *, unsigned int);
 	int (*clr_gpio)(struct xgbe_prv_data *, unsigned int);
@@ -865,10 +833,6 @@ struct xgbe_hw_if {
 	void (*enable_vxlan)(struct xgbe_prv_data *);
 	void (*disable_vxlan)(struct xgbe_prv_data *);
 	void (*set_vxlan_id)(struct xgbe_prv_data *);
-
-	/* For Split Header */
-	void (*enable_sph)(struct xgbe_prv_data *pdata);
-	void (*disable_sph)(struct xgbe_prv_data *pdata);
 };
 
 /* This structure represents implementation specific routines for an
@@ -1049,7 +1013,6 @@ struct xgbe_version_data {
 	unsigned int tx_desc_prefetch;
 	unsigned int rx_desc_prefetch;
 	unsigned int an_cdr_workaround;
-	unsigned int enable_rrc;
 };
 
 struct xgbe_prv_data {
@@ -1291,7 +1254,6 @@ struct xgbe_prv_data {
 	unsigned int parallel_detect;
 	unsigned int fec_ability;
 	unsigned long an_start;
-	unsigned long kr_start_time;
 	enum xgbe_an_mode an_mode;
 
 	/* I2C support */
@@ -1302,11 +1264,11 @@ struct xgbe_prv_data {
 
 	unsigned int lpm_ctrl;		/* CTRL1 for resume */
 
-	unsigned int isr_as_bh_work;
-	struct work_struct dev_bh_work;
-	struct work_struct ecc_bh_work;
-	struct work_struct i2c_bh_work;
-	struct work_struct an_bh_work;
+	unsigned int isr_as_tasklet;
+	struct tasklet_struct tasklet_dev;
+	struct tasklet_struct tasklet_ecc;
+	struct tasklet_struct tasklet_i2c;
+	struct tasklet_struct tasklet_an;
 
 	struct dentry *xgbe_debugfs;
 
@@ -1321,10 +1283,6 @@ struct xgbe_prv_data {
 
 	bool debugfs_an_cdr_workaround;
 	bool debugfs_an_cdr_track_early;
-	bool en_rx_adap;
-	int rx_adapt_retries;
-	bool rx_adapt_done;
-	bool mode_set;
 };
 
 /* Function prototypes*/

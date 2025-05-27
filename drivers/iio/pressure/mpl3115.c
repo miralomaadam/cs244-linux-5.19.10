@@ -230,9 +230,9 @@ static const struct iio_info mpl3115_info = {
 	.read_raw = &mpl3115_read_raw,
 };
 
-static int mpl3115_probe(struct i2c_client *client)
+static int mpl3115_probe(struct i2c_client *client,
+			 const struct i2c_device_id *id)
 {
-	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct mpl3115_data *data;
 	struct iio_dev *indio_dev;
 	int ret;
@@ -290,13 +290,15 @@ static int mpl3115_standby(struct mpl3115_data *data)
 		data->ctrl_reg1 & ~MPL3115_CTRL_ACTIVE);
 }
 
-static void mpl3115_remove(struct i2c_client *client)
+static int mpl3115_remove(struct i2c_client *client)
 {
 	struct iio_dev *indio_dev = i2c_get_clientdata(client);
 
 	iio_device_unregister(indio_dev);
 	iio_triggered_buffer_cleanup(indio_dev);
 	mpl3115_standby(iio_priv(indio_dev));
+
+	return 0;
 }
 
 static int mpl3115_suspend(struct device *dev)
@@ -318,7 +320,7 @@ static DEFINE_SIMPLE_DEV_PM_OPS(mpl3115_pm_ops, mpl3115_suspend,
 				mpl3115_resume);
 
 static const struct i2c_device_id mpl3115_id[] = {
-	{ "mpl3115" },
+	{ "mpl3115", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mpl3115_id);

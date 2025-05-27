@@ -8,7 +8,6 @@
 #include "../ctree.h"
 #include "../extent_io.h"
 #include "../disk-io.h"
-#include "../accessors.h"
 
 static int test_btrfs_split_item(u32 sectorsize, u32 nodesize)
 {
@@ -48,8 +47,7 @@ static int test_btrfs_split_item(u32 sectorsize, u32 nodesize)
 		goto out;
 	}
 
-	eb = alloc_dummy_extent_buffer(fs_info, nodesize);
-	path->nodes[0] = eb;
+	path->nodes[0] = eb = alloc_dummy_extent_buffer(fs_info, nodesize);
 	if (!eb) {
 		test_std_err(TEST_ALLOC_EXTENT_BUFFER);
 		ret = -ENOMEM;
@@ -61,11 +59,7 @@ static int test_btrfs_split_item(u32 sectorsize, u32 nodesize)
 	key.type = BTRFS_EXTENT_CSUM_KEY;
 	key.offset = 0;
 
-	/*
-	 * Passing a NULL trans handle is fine here, we have a dummy root eb
-	 * and the tree is a single node (level 0).
-	 */
-	btrfs_setup_item_for_insert(NULL, root, path, &key, value_len);
+	btrfs_setup_item_for_insert(root, path, &key, value_len);
 	write_extent_buffer(eb, value, btrfs_item_ptr_offset(eb, 0),
 			    value_len);
 

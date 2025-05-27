@@ -11,9 +11,8 @@
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_device.h>
-#include <drm/drm_fb_dma_helper.h>
-#include <drm/drm_framebuffer.h>
-#include <drm/drm_gem_dma_helper.h>
+#include <drm/drm_fb_cma_helper.h>
+#include <drm/drm_gem_cma_helper.h>
 
 #include "sti_compositor.h"
 #include "sti_cursor.h"
@@ -200,9 +199,6 @@ static int sti_cursor_atomic_check(struct drm_plane *drm_plane,
 		return 0;
 
 	crtc_state = drm_atomic_get_crtc_state(state, crtc);
-	if (IS_ERR(crtc_state))
-		return PTR_ERR(crtc_state);
-
 	mode = &crtc_state->mode;
 	dst_x = new_plane_state->crtc_x;
 	dst_y = new_plane_state->crtc_y;
@@ -246,8 +242,8 @@ static int sti_cursor_atomic_check(struct drm_plane *drm_plane,
 		}
 	}
 
-	if (!drm_fb_dma_get_gem_obj(fb, 0)) {
-		DRM_ERROR("Can't get DMA GEM object for fb\n");
+	if (!drm_fb_cma_get_gem_obj(fb, 0)) {
+		DRM_ERROR("Can't get CMA GEM object for fb\n");
 		return -EINVAL;
 	}
 
@@ -270,7 +266,7 @@ static void sti_cursor_atomic_update(struct drm_plane *drm_plane,
 	struct drm_framebuffer *fb = newstate->fb;
 	struct drm_display_mode *mode;
 	int dst_x, dst_y;
-	struct drm_gem_dma_object *dma_obj;
+	struct drm_gem_cma_object *cma_obj;
 	u32 y, x;
 	u32 val;
 
@@ -281,10 +277,10 @@ static void sti_cursor_atomic_update(struct drm_plane *drm_plane,
 	dst_x = newstate->crtc_x;
 	dst_y = newstate->crtc_y;
 
-	dma_obj = drm_fb_dma_get_gem_obj(fb, 0);
+	cma_obj = drm_fb_cma_get_gem_obj(fb, 0);
 
 	/* Convert ARGB8888 to CLUT8 */
-	sti_cursor_argb8888_to_clut8(cursor, (u32 *)dma_obj->vaddr);
+	sti_cursor_argb8888_to_clut8(cursor, (u32 *)cma_obj->vaddr);
 
 	/* AWS and AWE depend on the mode */
 	y = sti_vtg_get_line_number(*mode, 0);

@@ -30,7 +30,7 @@ END_FTR_SECTION_IFSET(CPU_FTR_COHERENT_ICACHE)
 #ifdef CONFIG_PPC64
 	mflr	r12
   .cfi_register lr,r12
-	get_datapage	r10 vdso_u_arch_data
+	get_datapage	r10
 	mtlr	r12
   .cfi_restore	lr
 #endif
@@ -91,7 +91,6 @@ END_FTR_SECTION_IFSET(CPU_FTR_COHERENT_ICACHE)
 3:
 	crclr	cr0*4+so
 	sync
-	icbi	0,r1
 	isync
 	li	r3,0
 	blr

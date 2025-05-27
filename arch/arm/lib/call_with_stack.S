@@ -46,6 +46,4 @@ UNWIND( .setfp	fpreg, sp	)
 	pop	{fpreg, pc}
 UNWIND( .fnend			)
 #endif
-	.globl call_with_stack_end
-call_with_stack_end:
 ENDPROC(call_with_stack)

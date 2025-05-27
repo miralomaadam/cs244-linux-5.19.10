@@ -46,12 +46,9 @@
 		serial1 = &lpuart1;
 		serial2 = &lpuart2;
 		serial3 = &lpuart3;
-		spi0 = &lpspi0;
-		spi1 = &lpspi1;
-		spi2 = &lpspi2;
-		spi3 = &lpspi3;
-		vpu-core0 = &vpu_core0;
-		vpu-core1 = &vpu_core1;
+		vpu_core0 = &vpu_core0;
+		vpu_core1 = &vpu_core1;
+		vpu_core2 = &vpu_core2;
 	};
 
 	cpus {
@@ -130,7 +127,6 @@
 		A35_L2: l2-cache0 {
 			compatible = "cache";
 			cache-level = <2>;
-			cache-unified;
 			cache-size = <0x80000>;
 			cache-line-size = <64>;
 			cache-sets = <1024>;
@@ -187,7 +183,6 @@
 		dsp_reserved: dsp@92400000 {
 			reg = <0 0x92400000 0 0x2000000>;
 			no-map;
-			status = "disabled";
 		};
 
 		encoder_rpc: encoder-rpc@94400000 {
@@ -206,7 +201,7 @@
 		method = "smc";
 	};
 
-	system-controller {
+	scu {
 		compatible = "fsl,imx-scu";
 		mbox-names = "tx0",
 			     "rx0",
@@ -215,27 +210,29 @@
 			  &lsio_mu1 1 0
 			  &lsio_mu1 3 3>;
 
-		pd: power-controller {
+		pd: imx8qx-pd {
 			compatible = "fsl,imx8qxp-scu-pd", "fsl,scu-pd";
 			#power-domain-cells = <1>;
 		};
 
 		clk: clock-controller {
-			compatible = "fsl,imx8qxp-clk", "fsl,scu-clk";
+			compatible = "fsl,imx8qxp-clk";
 			#clock-cells = <2>;
+			clocks = <&xtal32k &xtal24m>;
+			clock-names = "xtal_32KHz", "xtal_24Mhz";
 		};
 
 		iomuxc: pinctrl {
 			compatible = "fsl,imx8qxp-iomuxc";
 		};
 
-		ocotp: ocotp {
+		ocotp: imx8qx-ocotp {
 			compatible = "fsl,imx8qxp-scu-ocotp";
 			#address-cells = <1>;
 			#size-cells = <1>;
 		};
 
-		scu_key: keys {
+		scu_key: scu-key {
 			compatible = "fsl,imx8qxp-sc-key", "fsl,imx-sc-key";
 			linux,keycodes = <KEY_POWER>;
 			status = "disabled";
@@ -264,13 +261,6 @@
 			     <GIC_PPI 10 IRQ_TYPE_LEVEL_LOW>; /* Hypervisor */
 	};
 
-	clk_dummy: clock-dummy {
-		compatible = "fixed-clock";
-		#clock-cells = <0>;
-		clock-frequency = <0>;
-		clock-output-names = "clk_dummy";
-	};
-
 	xtal32k: clock-xtal32k {
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
@@ -286,7 +276,7 @@
 	};
 
 	thermal_zones: thermal-zones {
-		cpu0-thermal {
+		cpu-thermal0 {
 			polling-delay-passive = <250>;
 			polling-delay = <2000>;
 			thermal-sensors = <&tsens IMX_SC_R_SYSTEM>;
@@ -321,18 +311,13 @@
 	/* sorted in register address */
 	#include "imx8-ss-img.dtsi"
 	#include "imx8-ss-vpu.dtsi"
-	#include "imx8-ss-cm40.dtsi"
-	#include "imx8-ss-gpu0.dtsi"
 	#include "imx8-ss-adma.dtsi"
 	#include "imx8-ss-conn.dtsi"
 	#include "imx8-ss-ddr.dtsi"
 	#include "imx8-ss-lsio.dtsi"
-	#include "imx8-ss-hsio.dtsi"
 };
 
 #include "imx8qxp-ss-img.dtsi"
-#include "imx8qxp-ss-vpu.dtsi"
 #include "imx8qxp-ss-adma.dtsi"
 #include "imx8qxp-ss-conn.dtsi"
 #include "imx8qxp-ss-lsio.dtsi"
-#include "imx8qxp-ss-hsio.dtsi"

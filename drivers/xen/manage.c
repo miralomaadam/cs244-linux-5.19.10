@@ -205,10 +205,10 @@ static void do_poweroff(void)
 static void do_reboot(void)
 {
 	shutting_down = SHUTDOWN_POWEROFF; /* ? */
-	orderly_reboot();
+	ctrl_alt_del();
 }
 
-static const struct shutdown_handler shutdown_handlers[] = {
+static struct shutdown_handler shutdown_handlers[] = {
 	{ "poweroff",	true,	do_poweroff },
 	{ "halt",	false,	do_poweroff },
 	{ "reboot",	true,	do_reboot   },

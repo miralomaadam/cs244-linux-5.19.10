@@ -18,17 +18,11 @@ properties:
   compatible:
     const: samsung,s6e63m0
 
-  reg:
-    maxItems: 1
-
+  reg: true
   reset-gpios: true
   port: true
   default-brightness: true
   max-brightness: true
-
-  spi-3wire: true
-  spi-cpha: true
-  spi-cpol: true
 
   vdd3-supply:
     description: VDD regulator

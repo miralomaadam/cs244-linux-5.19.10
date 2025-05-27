@@ -74,11 +74,6 @@ static const struct nla_policy ets_class_policy[TCA_ETS_MAX + 1] = {
 	[TCA_ETS_QUANTA_BAND] = { .type = NLA_U32 },
 };
 
-static bool cl_is_active(struct ets_class *cl)
-{
-	return !list_empty(&cl->alist);
-}
-
 static int ets_quantum_parse(struct Qdisc *sch, const struct nlattr *attr,
 			     unsigned int *quantum,
 			     struct netlink_ext_ack *extack)
@@ -96,8 +91,6 @@ ets_class_from_arg(struct Qdisc *sch, unsigned long arg)
 {
 	struct ets_sched *q = qdisc_priv(sch);
 
-	if (arg == 0 || arg > q->nbands)
-		return NULL;
 	return &q->classes[arg - 1];
 }
 
@@ -298,7 +291,7 @@ static void ets_class_qlen_notify(struct Qdisc *sch, unsigned long arg)
 	 * to remove them.
 	 */
 	if (!ets_class_is_strict(q, cl) && sch->q.qlen)
-		list_del_init(&cl->alist);
+		list_del(&cl->alist);
 }
 
 static int ets_class_dump(struct Qdisc *sch, unsigned long arg,
@@ -348,8 +341,15 @@ static void ets_qdisc_walk(struct Qdisc *sch, struct qdisc_walker *arg)
 		return;
 
 	for (i = 0; i < q->nbands; i++) {
-		if (!tc_qdisc_stats_dump(sch, i + 1, arg))
+		if (arg->count < arg->skip) {
+			arg->count++;
+			continue;
+		}
+		if (arg->fn(sch, i + 1, arg) < 0) {
+			arg->stop = 1;
 			break;
+		}
+		arg->count++;
 	}
 }
 
@@ -421,6 +421,7 @@ static int ets_qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 	struct ets_sched *q = qdisc_priv(sch);
 	struct ets_class *cl;
 	int err = 0;
+	bool first;
 
 	cl = ets_classify(skb, sch, &err);
 	if (!cl) {
@@ -430,6 +431,7 @@ static int ets_qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 		return err;
 	}
 
+	first = !cl->qdisc->q.qlen;
 	err = qdisc_enqueue(skb, cl->qdisc, to_free);
 	if (unlikely(err != NET_XMIT_SUCCESS)) {
 		if (net_xmit_drop_count(err)) {
@@ -439,7 +441,7 @@ static int ets_qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 		return err;
 	}
 
-	if (!cl_is_active(cl) && !ets_class_is_strict(q, cl)) {
+	if (first && !ets_class_is_strict(q, cl)) {
 		list_add_tail(&cl->alist, &q->active);
 		cl->deficit = cl->quantum;
 	}
@@ -491,7 +493,7 @@ static struct sk_buff *ets_qdisc_dequeue(struct Qdisc *sch)
 			if (unlikely(!skb))
 				goto out;
 			if (cl->qdisc->q.qlen == 0)
-				list_del_init(&cl->alist);
+				list_del(&cl->alist);
 			return ets_qdisc_dequeue_skb(sch, skb);
 		}
 
@@ -592,6 +594,11 @@ static int ets_qdisc_change(struct Qdisc *sch, struct nlattr *opt,
 	unsigned int i;
 	int err;
 
+	if (!opt) {
+		NL_SET_ERR_MSG(extack, "ETS options are required for this operation");
+		return -EINVAL;
+	}
+
 	err = nla_parse_nested(tb, TCA_ETS_MAX, opt, ets_policy, extack);
 	if (err < 0)
 		return err;
@@ -651,7 +658,7 @@ static int ets_qdisc_change(struct Qdisc *sch, struct nlattr *opt,
 
 	sch_tree_lock(sch);
 
-	WRITE_ONCE(q->nbands, nbands);
+	q->nbands = nbands;
 	for (i = nstrict; i < q->nstrict; i++) {
 		if (q->classes[i].qdisc->q.qlen) {
 			list_add_tail(&q->classes[i].alist, &q->active);
@@ -660,14 +667,14 @@ static int ets_qdisc_change(struct Qdisc *sch, struct nlattr *opt,
 	}
 	for (i = q->nbands; i < oldbands; i++) {
 		if (i >= q->nstrict && q->classes[i].qdisc->q.qlen)
-			list_del_init(&q->classes[i].alist);
+			list_del(&q->classes[i].alist);
 		qdisc_tree_flush_backlog(q->classes[i].qdisc);
 	}
-	WRITE_ONCE(q->nstrict, nstrict);
+	q->nstrict = nstrict;
 	memcpy(q->prio2band, priomap, sizeof(priomap));
 
 	for (i = 0; i < q->nbands; i++)
-		WRITE_ONCE(q->classes[i].quantum, quanta[i]);
+		q->classes[i].quantum = quanta[i];
 
 	for (i = oldbands; i < q->nbands; i++) {
 		q->classes[i].qdisc = queues[i];
@@ -681,7 +688,7 @@ static int ets_qdisc_change(struct Qdisc *sch, struct nlattr *opt,
 	for (i = q->nbands; i < oldbands; i++) {
 		qdisc_put(q->classes[i].qdisc);
 		q->classes[i].qdisc = NULL;
-		WRITE_ONCE(q->classes[i].quantum, 0);
+		q->classes[i].quantum = 0;
 		q->classes[i].deficit = 0;
 		gnet_stats_basic_sync_init(&q->classes[i].bstats);
 		memset(&q->classes[i].qstats, 0, sizeof(q->classes[i].qstats));
@@ -716,10 +723,12 @@ static void ets_qdisc_reset(struct Qdisc *sch)
 
 	for (band = q->nstrict; band < q->nbands; band++) {
 		if (q->classes[band].qdisc->q.qlen)
-			list_del_init(&q->classes[band].alist);
+			list_del(&q->classes[band].alist);
 	}
 	for (band = 0; band < q->nbands; band++)
 		qdisc_reset(q->classes[band].qdisc);
+	sch->qstats.backlog = 0;
+	sch->q.qlen = 0;
 }
 
 static void ets_qdisc_destroy(struct Qdisc *sch)
@@ -738,7 +747,6 @@ static int ets_qdisc_dump(struct Qdisc *sch, struct sk_buff *skb)
 	struct ets_sched *q = qdisc_priv(sch);
 	struct nlattr *opts;
 	struct nlattr *nest;
-	u8 nbands, nstrict;
 	int band;
 	int prio;
 	int err;
@@ -751,22 +759,21 @@ static int ets_qdisc_dump(struct Qdisc *sch, struct sk_buff *skb)
 	if (!opts)
 		goto nla_err;
 
-	nbands = READ_ONCE(q->nbands);
-	if (nla_put_u8(skb, TCA_ETS_NBANDS, nbands))
+	if (nla_put_u8(skb, TCA_ETS_NBANDS, q->nbands))
 		goto nla_err;
 
-	nstrict = READ_ONCE(q->nstrict);
-	if (nstrict && nla_put_u8(skb, TCA_ETS_NSTRICT, nstrict))
+	if (q->nstrict &&
+	    nla_put_u8(skb, TCA_ETS_NSTRICT, q->nstrict))
 		goto nla_err;
 
-	if (nbands > nstrict) {
+	if (q->nbands > q->nstrict) {
 		nest = nla_nest_start(skb, TCA_ETS_QUANTA);
 		if (!nest)
 			goto nla_err;
 
-		for (band = nstrict; band < nbands; band++) {
+		for (band = q->nstrict; band < q->nbands; band++) {
 			if (nla_put_u32(skb, TCA_ETS_QUANTA_BAND,
-					READ_ONCE(q->classes[band].quantum)))
+					q->classes[band].quantum))
 				goto nla_err;
 		}
 
@@ -778,8 +785,7 @@ static int ets_qdisc_dump(struct Qdisc *sch, struct sk_buff *skb)
 		goto nla_err;
 
 	for (prio = 0; prio <= TC_PRIO_MAX; prio++) {
-		if (nla_put_u8(skb, TCA_ETS_PRIOMAP_BAND,
-			       READ_ONCE(q->prio2band[prio])))
+		if (nla_put_u8(skb, TCA_ETS_PRIOMAP_BAND, q->prio2band[prio]))
 			goto nla_err;
 	}
 
@@ -820,7 +826,6 @@ static struct Qdisc_ops ets_qdisc_ops __read_mostly = {
 	.dump		= ets_qdisc_dump,
 	.owner		= THIS_MODULE,
 };
-MODULE_ALIAS_NET_SCH("ets");
 
 static int __init ets_init(void)
 {
@@ -835,4 +840,3 @@ static void __exit ets_exit(void)
 module_init(ets_init);
 module_exit(ets_exit);
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Enhanced Transmission Selection(ETS) scheduler");

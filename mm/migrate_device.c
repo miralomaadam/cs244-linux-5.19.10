@@ -7,7 +7,6 @@
 #include <linux/export.h>
 #include <linux/memremap.h>
 #include <linux/migrate.h>
-#include <linux/mm.h>
 #include <linux/mm_inline.h>
 #include <linux/mmu_notifier.h>
 #include <linux/oom.h>
@@ -60,8 +59,6 @@ static int migrate_vma_collect_pmd(pmd_t *pmdp,
 				   struct mm_walk *walk)
 {
 	struct migrate_vma *migrate = walk->private;
-	struct folio *fault_folio = migrate->fault_page ?
-		page_folio(migrate->fault_page) : NULL;
 	struct vm_area_struct *vma = walk->vma;
 	struct mm_struct *mm = vma->vm_mm;
 	unsigned long addr = start, unmapped = 0;
@@ -73,7 +70,7 @@ again:
 		return migrate_vma_collect_hole(start, end, -1, walk);
 
 	if (pmd_trans_huge(*pmdp)) {
-		struct folio *folio;
+		struct page *page;
 
 		ptl = pmd_lock(mm, pmdp);
 		if (unlikely(!pmd_trans_huge(*pmdp))) {
@@ -81,46 +78,46 @@ again:
 			goto again;
 		}
 
-		folio = pmd_folio(*pmdp);
-		if (is_huge_zero_folio(folio)) {
+		page = pmd_page(*pmdp);
+		if (is_huge_zero_page(page)) {
 			spin_unlock(ptl);
 			split_huge_pmd(vma, pmdp, addr);
+			if (pmd_trans_unstable(pmdp))
+				return migrate_vma_collect_skip(start, end,
+								walk);
 		} else {
 			int ret;
 
-			folio_get(folio);
+			get_page(page);
 			spin_unlock(ptl);
-			/* FIXME: we don't expect THP for fault_folio */
-			if (WARN_ON_ONCE(fault_folio == folio))
+			if (unlikely(!trylock_page(page)))
 				return migrate_vma_collect_skip(start, end,
 								walk);
-			if (unlikely(!folio_trylock(folio)))
-				return migrate_vma_collect_skip(start, end,
-								walk);
-			ret = split_folio(folio);
-			if (fault_folio != folio)
-				folio_unlock(folio);
-			folio_put(folio);
+			ret = split_huge_page(page);
+			unlock_page(page);
+			put_page(page);
 			if (ret)
 				return migrate_vma_collect_skip(start, end,
+								walk);
+			if (pmd_none(*pmdp))
+				return migrate_vma_collect_hole(start, end, -1,
 								walk);
 		}
 	}
 
+	if (unlikely(pmd_bad(*pmdp)))
+		return migrate_vma_collect_skip(start, end, walk);
+
 	ptep = pte_offset_map_lock(mm, pmdp, addr, &ptl);
-	if (!ptep)
-		goto again;
 	arch_enter_lazy_mmu_mode();
 
 	for (; addr < end; addr += PAGE_SIZE, ptep++) {
-		struct dev_pagemap *pgmap;
 		unsigned long mpfn = 0, pfn;
-		struct folio *folio;
 		struct page *page;
 		swp_entry_t entry;
 		pte_t pte;
 
-		pte = ptep_get(ptep);
+		pte = *ptep;
 
 		if (pte_none(pte)) {
 			if (vma_is_anonymous(vma)) {
@@ -141,10 +138,9 @@ again:
 				goto next;
 
 			page = pfn_swap_entry_to_page(entry);
-			pgmap = page_pgmap(page);
 			if (!(migrate->flags &
 				MIGRATE_VMA_SELECT_DEVICE_PRIVATE) ||
-			    pgmap->owner != migrate->pgmap_owner)
+			    page->pgmap->owner != migrate->pgmap_owner)
 				goto next;
 
 			mpfn = migrate_pfn(page_to_pfn(page)) |
@@ -152,25 +148,15 @@ again:
 			if (is_writable_device_private_entry(entry))
 				mpfn |= MIGRATE_PFN_WRITE;
 		} else {
+			if (!(migrate->flags & MIGRATE_VMA_SELECT_SYSTEM))
+				goto next;
 			pfn = pte_pfn(pte);
-			if (is_zero_pfn(pfn) &&
-			    (migrate->flags & MIGRATE_VMA_SELECT_SYSTEM)) {
+			if (is_zero_pfn(pfn)) {
 				mpfn = MIGRATE_PFN_MIGRATE;
 				migrate->cpages++;
 				goto next;
 			}
 			page = vm_normal_page(migrate->vma, addr, pte);
-			if (page && !is_zone_device_page(page) &&
-			    !(migrate->flags & MIGRATE_VMA_SELECT_SYSTEM)) {
-				goto next;
-			} else if (page && is_device_coherent_page(page)) {
-				pgmap = page_pgmap(page);
-
-				if (!(migrate->flags &
-					MIGRATE_VMA_SELECT_DEVICE_COHERENT) ||
-					pgmap->owner != migrate->pgmap_owner)
-					goto next;
-			}
 			mpfn = migrate_pfn(pfn) | MIGRATE_PFN_MIGRATE;
 			mpfn |= pte_write(pte) ? MIGRATE_PFN_WRITE : 0;
 		}
@@ -182,56 +168,42 @@ again:
 		}
 
 		/*
-		 * By getting a reference on the folio we pin it and that blocks
+		 * By getting a reference on the page we pin it and that blocks
 		 * any kind of migration. Side effect is that it "freezes" the
 		 * pte.
 		 *
-		 * We drop this reference after isolating the folio from the lru
-		 * for non device folio (device folio are not on the lru and thus
+		 * We drop this reference after isolating the page from the lru
+		 * for non device page (device page are not on the lru and thus
 		 * can't be dropped from it).
 		 */
-		folio = page_folio(page);
-		folio_get(folio);
+		get_page(page);
 
 		/*
-		 * We rely on folio_trylock() to avoid deadlock between
-		 * concurrent migrations where each is waiting on the others
-		 * folio lock. If we can't immediately lock the folio we fail this
-		 * migration as it is only best effort anyway.
-		 *
-		 * If we can lock the folio it's safe to set up a migration entry
-		 * now. In the common case where the folio is mapped once in a
-		 * single process setting up the migration entry now is an
-		 * optimisation to avoid walking the rmap later with
-		 * try_to_migrate().
+		 * Optimize for the common case where page is only mapped once
+		 * in one process. If we can lock the page, then we can safely
+		 * set up a special migration page table entry now.
 		 */
-		if (fault_folio == folio || folio_trylock(folio)) {
+		if (trylock_page(page)) {
 			bool anon_exclusive;
 			pte_t swp_pte;
 
-			flush_cache_page(vma, addr, pte_pfn(pte));
-			anon_exclusive = folio_test_anon(folio) &&
-					  PageAnonExclusive(page);
+			anon_exclusive = PageAnon(page) && PageAnonExclusive(page);
 			if (anon_exclusive) {
-				pte = ptep_clear_flush(vma, addr, ptep);
+				flush_cache_page(vma, addr, pte_pfn(*ptep));
+				ptep_clear_flush(vma, addr, ptep);
 
-				if (folio_try_share_anon_rmap_pte(folio, page)) {
+				if (page_try_share_anon_rmap(page)) {
 					set_pte_at(mm, addr, ptep, pte);
-					if (fault_folio != folio)
-						folio_unlock(folio);
-					folio_put(folio);
+					unlock_page(page);
+					put_page(page);
 					mpfn = 0;
 					goto next;
 				}
 			} else {
-				pte = ptep_get_and_clear(mm, addr, ptep);
+				ptep_get_and_clear(mm, addr, ptep);
 			}
 
 			migrate->cpages++;
-
-			/* Set the dirty flag on the folio now the pte is gone. */
-			if (pte_dirty(pte))
-				folio_mark_dirty(folio);
 
 			/* Setup special migration page table entry */
 			if (mpfn & MIGRATE_PFN_WRITE)
@@ -243,12 +215,6 @@ again:
 			else
 				entry = make_readable_migration_entry(
 							page_to_pfn(page));
-			if (pte_present(pte)) {
-				if (pte_young(pte))
-					entry = make_migration_entry_young(entry);
-				if (pte_dirty(pte))
-					entry = make_migration_entry_dirty(entry);
-			}
 			swp_pte = swp_entry_to_pte(entry);
 			if (pte_present(pte)) {
 				if (pte_soft_dirty(pte))
@@ -265,16 +231,16 @@ again:
 
 			/*
 			 * This is like regular unmap: we remove the rmap and
-			 * drop the folio refcount. The folio won't be freed, as
-			 * we took a reference just above.
+			 * drop page refcount. Page won't be freed, as we took
+			 * a reference just above.
 			 */
-			folio_remove_rmap_pte(folio, page, vma);
-			folio_put(folio);
+			page_remove_rmap(page, vma, false);
+			put_page(page);
 
 			if (pte_present(pte))
 				unmapped++;
 		} else {
-			folio_put(folio);
+			put_page(page);
 			mpfn = 0;
 		}
 
@@ -282,13 +248,12 @@ next:
 		migrate->dst[migrate->npages] = 0;
 		migrate->src[migrate->npages++] = mpfn;
 	}
+	arch_leave_lazy_mmu_mode();
+	pte_unmap_unlock(ptep - 1, ptl);
 
 	/* Only flush the TLB if we actually modified any entries */
 	if (unmapped)
 		flush_tlb_range(walk->vma, start, end);
-
-	arch_leave_lazy_mmu_mode();
-	pte_unmap_unlock(ptep - 1, ptl);
 
 	return 0;
 }
@@ -296,7 +261,6 @@ next:
 static const struct mm_walk_ops migrate_vma_walk_ops = {
 	.pmd_entry		= migrate_vma_collect_pmd,
 	.pte_hole		= migrate_vma_collect_hole,
-	.walk_lock		= PGWALK_RDLOCK,
 };
 
 /*
@@ -317,7 +281,7 @@ static void migrate_vma_collect(struct migrate_vma *migrate)
 	 * private page mappings that won't be migrated.
 	 */
 	mmu_notifier_range_init_owner(&range, MMU_NOTIFY_MIGRATE, 0,
-		migrate->vma->vm_mm, migrate->start, migrate->end,
+		migrate->vma, migrate->vma->vm_mm, migrate->start, migrate->end,
 		migrate->pgmap_owner);
 	mmu_notifier_invalidate_range_start(&range);
 
@@ -336,120 +300,35 @@ static void migrate_vma_collect(struct migrate_vma *migrate)
  * folio_migrate_mapping(), except that here we allow migration of a
  * ZONE_DEVICE page.
  */
-static bool migrate_vma_check_page(struct page *page, struct page *fault_page)
+static bool migrate_vma_check_page(struct page *page)
 {
-	struct folio *folio = page_folio(page);
-
 	/*
 	 * One extra ref because caller holds an extra reference, either from
-	 * folio_isolate_lru() for a regular folio, or migrate_vma_collect() for
-	 * a device folio.
+	 * isolate_lru_page() for a regular page, or migrate_vma_collect() for
+	 * a device page.
 	 */
-	int extra = 1 + (page == fault_page);
+	int extra = 1;
 
 	/*
 	 * FIXME support THP (transparent huge page), it is bit more complex to
 	 * check them than regular pages, because they can be mapped with a pmd
 	 * or with a pte (split pte mapping).
 	 */
-	if (folio_test_large(folio))
+	if (PageCompound(page))
 		return false;
 
 	/* Page from ZONE_DEVICE have one extra reference */
-	if (folio_is_zone_device(folio))
+	if (is_zone_device_page(page))
 		extra++;
 
 	/* For file back page */
-	if (folio_mapping(folio))
-		extra += 1 + folio_has_private(folio);
+	if (page_mapping(page))
+		extra += 1 + page_has_private(page);
 
-	if ((folio_ref_count(folio) - extra) > folio_mapcount(folio))
+	if ((page_count(page) - extra) > page_mapcount(page))
 		return false;
 
 	return true;
-}
-
-/*
- * Unmaps pages for migration. Returns number of source pfns marked as
- * migrating.
- */
-static unsigned long migrate_device_unmap(unsigned long *src_pfns,
-					  unsigned long npages,
-					  struct page *fault_page)
-{
-	struct folio *fault_folio = fault_page ?
-		page_folio(fault_page) : NULL;
-	unsigned long i, restore = 0;
-	bool allow_drain = true;
-	unsigned long unmapped = 0;
-
-	lru_add_drain();
-
-	for (i = 0; i < npages; i++) {
-		struct page *page = migrate_pfn_to_page(src_pfns[i]);
-		struct folio *folio;
-
-		if (!page) {
-			if (src_pfns[i] & MIGRATE_PFN_MIGRATE)
-				unmapped++;
-			continue;
-		}
-
-		folio =	page_folio(page);
-		/* ZONE_DEVICE folios are not on LRU */
-		if (!folio_is_zone_device(folio)) {
-			if (!folio_test_lru(folio) && allow_drain) {
-				/* Drain CPU's lru cache */
-				lru_add_drain_all();
-				allow_drain = false;
-			}
-
-			if (!folio_isolate_lru(folio)) {
-				src_pfns[i] &= ~MIGRATE_PFN_MIGRATE;
-				restore++;
-				continue;
-			}
-
-			/* Drop the reference we took in collect */
-			folio_put(folio);
-		}
-
-		if (folio_mapped(folio))
-			try_to_migrate(folio, 0);
-
-		if (folio_mapped(folio) ||
-		    !migrate_vma_check_page(page, fault_page)) {
-			if (!folio_is_zone_device(folio)) {
-				folio_get(folio);
-				folio_putback_lru(folio);
-			}
-
-			src_pfns[i] &= ~MIGRATE_PFN_MIGRATE;
-			restore++;
-			continue;
-		}
-
-		unmapped++;
-	}
-
-	for (i = 0; i < npages && restore; i++) {
-		struct page *page = migrate_pfn_to_page(src_pfns[i]);
-		struct folio *folio;
-
-		if (!page || (src_pfns[i] & MIGRATE_PFN_MIGRATE))
-			continue;
-
-		folio = page_folio(page);
-		remove_migration_ptes(folio, folio, 0);
-
-		src_pfns[i] = 0;
-		if (fault_folio != folio)
-			folio_unlock(folio);
-		folio_put(folio);
-		restore--;
-	}
-
-	return unmapped;
 }
 
 /*
@@ -465,8 +344,70 @@ static unsigned long migrate_device_unmap(unsigned long *src_pfns,
  */
 static void migrate_vma_unmap(struct migrate_vma *migrate)
 {
-	migrate->cpages = migrate_device_unmap(migrate->src, migrate->npages,
-					migrate->fault_page);
+	const unsigned long npages = migrate->npages;
+	unsigned long i, restore = 0;
+	bool allow_drain = true;
+
+	lru_add_drain();
+
+	for (i = 0; i < npages; i++) {
+		struct page *page = migrate_pfn_to_page(migrate->src[i]);
+		struct folio *folio;
+
+		if (!page)
+			continue;
+
+		/* ZONE_DEVICE pages are not on LRU */
+		if (!is_zone_device_page(page)) {
+			if (!PageLRU(page) && allow_drain) {
+				/* Drain CPU's pagevec */
+				lru_add_drain_all();
+				allow_drain = false;
+			}
+
+			if (isolate_lru_page(page)) {
+				migrate->src[i] &= ~MIGRATE_PFN_MIGRATE;
+				migrate->cpages--;
+				restore++;
+				continue;
+			}
+
+			/* Drop the reference we took in collect */
+			put_page(page);
+		}
+
+		folio = page_folio(page);
+		if (folio_mapped(folio))
+			try_to_migrate(folio, 0);
+
+		if (page_mapped(page) || !migrate_vma_check_page(page)) {
+			if (!is_zone_device_page(page)) {
+				get_page(page);
+				putback_lru_page(page);
+			}
+
+			migrate->src[i] &= ~MIGRATE_PFN_MIGRATE;
+			migrate->cpages--;
+			restore++;
+			continue;
+		}
+	}
+
+	for (i = 0; i < npages && restore; i++) {
+		struct page *page = migrate_pfn_to_page(migrate->src[i]);
+		struct folio *folio;
+
+		if (!page || (migrate->src[i] & MIGRATE_PFN_MIGRATE))
+			continue;
+
+		folio = page_folio(page);
+		remove_migration_ptes(folio, folio, false);
+
+		migrate->src[i] = 0;
+		folio_unlock(folio);
+		folio_put(folio);
+		restore--;
+	}
 }
 
 /**
@@ -551,10 +492,6 @@ int migrate_vma_setup(struct migrate_vma *args)
 		return -EINVAL;
 	if (!args->src || !args->dst)
 		return -EINVAL;
-	if (args->fault_page && !is_device_private_page(args->fault_page))
-		return -EINVAL;
-	if (args->fault_page && !PageLocked(args->fault_page))
-		return -EINVAL;
 
 	memset(args->src, 0, sizeof(*args->src) * nr_pages);
 	args->cpages = 0;
@@ -581,14 +518,13 @@ EXPORT_SYMBOL(migrate_vma_setup);
  *     handle_pte_fault()
  *       do_anonymous_page()
  * to map in an anonymous zero page but the struct page will be a ZONE_DEVICE
- * private or coherent page.
+ * private page.
  */
 static void migrate_vma_insert_page(struct migrate_vma *migrate,
 				    unsigned long addr,
 				    struct page *page,
 				    unsigned long *src)
 {
-	struct folio *folio = page_folio(page);
 	struct vm_area_struct *vma = migrate->vma;
 	struct mm_struct *mm = vma->vm_mm;
 	bool flush = false;
@@ -599,7 +535,6 @@ static void migrate_vma_insert_page(struct migrate_vma *migrate,
 	pud_t *pudp;
 	pmd_t *pmdp;
 	pte_t *ptep;
-	pte_t orig_pte;
 
 	/* Only allow populating anonymous memory */
 	if (!vma_is_anonymous(vma))
@@ -615,23 +550,40 @@ static void migrate_vma_insert_page(struct migrate_vma *migrate,
 	pmdp = pmd_alloc(mm, pudp, addr);
 	if (!pmdp)
 		goto abort;
+
 	if (pmd_trans_huge(*pmdp) || pmd_devmap(*pmdp))
-		goto abort;
-	if (pte_alloc(mm, pmdp))
-		goto abort;
-	if (unlikely(anon_vma_prepare(vma)))
-		goto abort;
-	if (mem_cgroup_charge(folio, vma->vm_mm, GFP_KERNEL))
 		goto abort;
 
 	/*
-	 * The memory barrier inside __folio_mark_uptodate makes sure that
-	 * preceding stores to the folio contents become visible before
+	 * Use pte_alloc() instead of pte_alloc_map().  We can't run
+	 * pte_offset_map() on pmds where a huge pmd might be created
+	 * from a different thread.
+	 *
+	 * pte_alloc_map() is safe to use under mmap_write_lock(mm) or when
+	 * parallel threads are excluded by other means.
+	 *
+	 * Here we only have mmap_read_lock(mm).
+	 */
+	if (pte_alloc(mm, pmdp))
+		goto abort;
+
+	/* See the comment in pte_alloc_one_map() */
+	if (unlikely(pmd_trans_unstable(pmdp)))
+		goto abort;
+
+	if (unlikely(anon_vma_prepare(vma)))
+		goto abort;
+	if (mem_cgroup_charge(page_folio(page), vma->vm_mm, GFP_KERNEL))
+		goto abort;
+
+	/*
+	 * The memory barrier inside __SetPageUptodate makes sure that
+	 * preceding stores to the page contents become visible before
 	 * the set_pte_at() write.
 	 */
-	__folio_mark_uptodate(folio);
+	__SetPageUptodate(page);
 
-	if (folio_is_device_private(folio)) {
+	if (is_device_private_page(page)) {
 		swp_entry_t swp_entry;
 
 		if (vma->vm_flags & VM_WRITE)
@@ -642,31 +594,31 @@ static void migrate_vma_insert_page(struct migrate_vma *migrate,
 						page_to_pfn(page));
 		entry = swp_entry_to_pte(swp_entry);
 	} else {
-		if (folio_is_zone_device(folio) &&
-		    !folio_is_device_coherent(folio)) {
+		/*
+		 * For now we only support migrating to un-addressable device
+		 * memory.
+		 */
+		if (is_zone_device_page(page)) {
 			pr_warn_once("Unsupported ZONE_DEVICE page type.\n");
 			goto abort;
 		}
 		entry = mk_pte(page, vma->vm_page_prot);
 		if (vma->vm_flags & VM_WRITE)
-			entry = pte_mkwrite(pte_mkdirty(entry), vma);
+			entry = pte_mkwrite(pte_mkdirty(entry));
 	}
 
 	ptep = pte_offset_map_lock(mm, pmdp, addr, &ptl);
-	if (!ptep)
-		goto abort;
-	orig_pte = ptep_get(ptep);
 
 	if (check_stable_address_space(mm))
 		goto unlock_abort;
 
-	if (pte_present(orig_pte)) {
-		unsigned long pfn = pte_pfn(orig_pte);
+	if (pte_present(*ptep)) {
+		unsigned long pfn = pte_pfn(*ptep);
 
 		if (!is_zero_pfn(pfn))
 			goto unlock_abort;
 		flush = true;
-	} else if (!pte_none(orig_pte))
+	} else if (!pte_none(*ptep))
 		goto unlock_abort;
 
 	/*
@@ -677,17 +629,21 @@ static void migrate_vma_insert_page(struct migrate_vma *migrate,
 		goto unlock_abort;
 
 	inc_mm_counter(mm, MM_ANONPAGES);
-	folio_add_new_anon_rmap(folio, vma, addr, RMAP_EXCLUSIVE);
-	if (!folio_is_zone_device(folio))
-		folio_add_lru_vma(folio, vma);
-	folio_get(folio);
+	page_add_new_anon_rmap(page, vma, addr);
+	if (!is_zone_device_page(page))
+		lru_cache_add_inactive_or_unevictable(page, vma);
+	get_page(page);
 
 	if (flush) {
-		flush_cache_page(vma, addr, pte_pfn(orig_pte));
-		ptep_clear_flush(vma, addr, ptep);
+		flush_cache_page(vma, addr, pte_pfn(*ptep));
+		ptep_clear_flush_notify(vma, addr, ptep);
+		set_pte_at_notify(mm, addr, ptep, entry);
+		update_mmu_cache(vma, addr, ptep);
+	} else {
+		/* No need to invalidate - it was non-present before */
+		set_pte_at(mm, addr, ptep, entry);
+		update_mmu_cache(vma, addr, ptep);
 	}
-	set_pte_at(mm, addr, ptep, entry);
-	update_mmu_cache(vma, addr, ptep);
 
 	pte_unmap_unlock(ptep, ptl);
 	*src = MIGRATE_PFN_MIGRATE;
@@ -699,111 +655,6 @@ abort:
 	*src &= ~MIGRATE_PFN_MIGRATE;
 }
 
-static void __migrate_device_pages(unsigned long *src_pfns,
-				unsigned long *dst_pfns, unsigned long npages,
-				struct migrate_vma *migrate)
-{
-	struct mmu_notifier_range range;
-	unsigned long i;
-	bool notified = false;
-
-	for (i = 0; i < npages; i++) {
-		struct page *newpage = migrate_pfn_to_page(dst_pfns[i]);
-		struct page *page = migrate_pfn_to_page(src_pfns[i]);
-		struct address_space *mapping;
-		struct folio *newfolio, *folio;
-		int r, extra_cnt = 0;
-
-		if (!newpage) {
-			src_pfns[i] &= ~MIGRATE_PFN_MIGRATE;
-			continue;
-		}
-
-		if (!page) {
-			unsigned long addr;
-
-			if (!(src_pfns[i] & MIGRATE_PFN_MIGRATE))
-				continue;
-
-			/*
-			 * The only time there is no vma is when called from
-			 * migrate_device_coherent_folio(). However this isn't
-			 * called if the page could not be unmapped.
-			 */
-			VM_BUG_ON(!migrate);
-			addr = migrate->start + i*PAGE_SIZE;
-			if (!notified) {
-				notified = true;
-
-				mmu_notifier_range_init_owner(&range,
-					MMU_NOTIFY_MIGRATE, 0,
-					migrate->vma->vm_mm, addr, migrate->end,
-					migrate->pgmap_owner);
-				mmu_notifier_invalidate_range_start(&range);
-			}
-			migrate_vma_insert_page(migrate, addr, newpage,
-						&src_pfns[i]);
-			continue;
-		}
-
-		newfolio = page_folio(newpage);
-		folio = page_folio(page);
-		mapping = folio_mapping(folio);
-
-		if (folio_is_device_private(newfolio) ||
-		    folio_is_device_coherent(newfolio)) {
-			if (mapping) {
-				/*
-				 * For now only support anonymous memory migrating to
-				 * device private or coherent memory.
-				 *
-				 * Try to get rid of swap cache if possible.
-				 */
-				if (!folio_test_anon(folio) ||
-				    !folio_free_swap(folio)) {
-					src_pfns[i] &= ~MIGRATE_PFN_MIGRATE;
-					continue;
-				}
-			}
-		} else if (folio_is_zone_device(newfolio)) {
-			/*
-			 * Other types of ZONE_DEVICE page are not supported.
-			 */
-			src_pfns[i] &= ~MIGRATE_PFN_MIGRATE;
-			continue;
-		}
-
-		BUG_ON(folio_test_writeback(folio));
-
-		if (migrate && migrate->fault_page == page)
-			extra_cnt = 1;
-		r = folio_migrate_mapping(mapping, newfolio, folio, extra_cnt);
-		if (r != MIGRATEPAGE_SUCCESS)
-			src_pfns[i] &= ~MIGRATE_PFN_MIGRATE;
-		else
-			folio_migrate_flags(newfolio, folio);
-	}
-
-	if (notified)
-		mmu_notifier_invalidate_range_end(&range);
-}
-
-/**
- * migrate_device_pages() - migrate meta-data from src page to dst page
- * @src_pfns: src_pfns returned from migrate_device_range()
- * @dst_pfns: array of pfns allocated by the driver to migrate memory to
- * @npages: number of pages in the range
- *
- * Equivalent to migrate_vma_pages(). This is called to migrate struct page
- * meta-data from source struct page to destination.
- */
-void migrate_device_pages(unsigned long *src_pfns, unsigned long *dst_pfns,
-			unsigned long npages)
-{
-	__migrate_device_pages(src_pfns, dst_pfns, npages, NULL);
-}
-EXPORT_SYMBOL(migrate_device_pages);
-
 /**
  * migrate_vma_pages() - migrate meta-data from src page to dst page
  * @migrate: migrate struct containing all migration information
@@ -814,78 +665,73 @@ EXPORT_SYMBOL(migrate_device_pages);
  */
 void migrate_vma_pages(struct migrate_vma *migrate)
 {
-	__migrate_device_pages(migrate->src, migrate->dst, migrate->npages, migrate);
-}
-EXPORT_SYMBOL(migrate_vma_pages);
+	const unsigned long npages = migrate->npages;
+	const unsigned long start = migrate->start;
+	struct mmu_notifier_range range;
+	unsigned long addr, i;
+	bool notified = false;
 
-static void __migrate_device_finalize(unsigned long *src_pfns,
-				      unsigned long *dst_pfns,
-				      unsigned long npages,
-				      struct page *fault_page)
-{
-	struct folio *fault_folio = fault_page ?
-		page_folio(fault_page) : NULL;
-	unsigned long i;
+	for (i = 0, addr = start; i < npages; addr += PAGE_SIZE, i++) {
+		struct page *newpage = migrate_pfn_to_page(migrate->dst[i]);
+		struct page *page = migrate_pfn_to_page(migrate->src[i]);
+		struct address_space *mapping;
+		int r;
 
-	for (i = 0; i < npages; i++) {
-		struct folio *dst = NULL, *src = NULL;
-		struct page *newpage = migrate_pfn_to_page(dst_pfns[i]);
-		struct page *page = migrate_pfn_to_page(src_pfns[i]);
-
-		if (newpage)
-			dst = page_folio(newpage);
-
-		if (!page) {
-			if (dst) {
-				WARN_ON_ONCE(fault_folio == dst);
-				folio_unlock(dst);
-				folio_put(dst);
-			}
+		if (!newpage) {
+			migrate->src[i] &= ~MIGRATE_PFN_MIGRATE;
 			continue;
 		}
 
-		src = page_folio(page);
+		if (!page) {
+			if (!(migrate->src[i] & MIGRATE_PFN_MIGRATE))
+				continue;
+			if (!notified) {
+				notified = true;
 
-		if (!(src_pfns[i] & MIGRATE_PFN_MIGRATE) || !dst) {
-			if (dst) {
-				WARN_ON_ONCE(fault_folio == dst);
-				folio_unlock(dst);
-				folio_put(dst);
+				mmu_notifier_range_init_owner(&range,
+					MMU_NOTIFY_MIGRATE, 0, migrate->vma,
+					migrate->vma->vm_mm, addr, migrate->end,
+					migrate->pgmap_owner);
+				mmu_notifier_invalidate_range_start(&range);
 			}
-			dst = src;
+			migrate_vma_insert_page(migrate, addr, newpage,
+						&migrate->src[i]);
+			continue;
 		}
 
-		if (!folio_is_zone_device(dst))
-			folio_add_lru(dst);
-		remove_migration_ptes(src, dst, 0);
-		if (fault_folio != src)
-			folio_unlock(src);
-		folio_put(src);
+		mapping = page_mapping(page);
 
-		if (dst != src) {
-			WARN_ON_ONCE(fault_folio == dst);
-			folio_unlock(dst);
-			folio_put(dst);
+		if (is_device_private_page(newpage)) {
+			/*
+			 * For now only support private anonymous when migrating
+			 * to un-addressable device memory.
+			 */
+			if (mapping) {
+				migrate->src[i] &= ~MIGRATE_PFN_MIGRATE;
+				continue;
+			}
+		} else if (is_zone_device_page(newpage)) {
+			/*
+			 * Other types of ZONE_DEVICE page are not supported.
+			 */
+			migrate->src[i] &= ~MIGRATE_PFN_MIGRATE;
+			continue;
 		}
+
+		r = migrate_page(mapping, newpage, page, MIGRATE_SYNC_NO_COPY);
+		if (r != MIGRATEPAGE_SUCCESS)
+			migrate->src[i] &= ~MIGRATE_PFN_MIGRATE;
 	}
-}
 
-/*
- * migrate_device_finalize() - complete page migration
- * @src_pfns: src_pfns returned from migrate_device_range()
- * @dst_pfns: array of pfns allocated by the driver to migrate memory to
- * @npages: number of pages in the range
- *
- * Completes migration of the page by removing special migration entries.
- * Drivers must ensure copying of page data is complete and visible to the CPU
- * before calling this.
- */
-void migrate_device_finalize(unsigned long *src_pfns,
-			     unsigned long *dst_pfns, unsigned long npages)
-{
-	return __migrate_device_finalize(src_pfns, dst_pfns, npages, NULL);
+	/*
+	 * No need to double call mmu_notifier->invalidate_range() callback as
+	 * the above ptep_clear_flush_notify() inside migrate_vma_insert_page()
+	 * did already call it.
+	 */
+	if (notified)
+		mmu_notifier_invalidate_range_only_end(&range);
 }
-EXPORT_SYMBOL(migrate_device_finalize);
+EXPORT_SYMBOL(migrate_vma_pages);
 
 /**
  * migrate_vma_finalize() - restore CPU page table entry
@@ -900,117 +746,47 @@ EXPORT_SYMBOL(migrate_device_finalize);
  */
 void migrate_vma_finalize(struct migrate_vma *migrate)
 {
-	__migrate_device_finalize(migrate->src, migrate->dst, migrate->npages,
-				  migrate->fault_page);
-}
-EXPORT_SYMBOL(migrate_vma_finalize);
-
-static unsigned long migrate_device_pfn_lock(unsigned long pfn)
-{
-	struct folio *folio;
-
-	folio = folio_get_nontail_page(pfn_to_page(pfn));
-	if (!folio)
-		return 0;
-
-	if (!folio_trylock(folio)) {
-		folio_put(folio);
-		return 0;
-	}
-
-	return migrate_pfn(pfn) | MIGRATE_PFN_MIGRATE;
-}
-
-/**
- * migrate_device_range() - migrate device private pfns to normal memory.
- * @src_pfns: array large enough to hold migrating source device private pfns.
- * @start: starting pfn in the range to migrate.
- * @npages: number of pages to migrate.
- *
- * migrate_vma_setup() is similar in concept to migrate_vma_setup() except that
- * instead of looking up pages based on virtual address mappings a range of
- * device pfns that should be migrated to system memory is used instead.
- *
- * This is useful when a driver needs to free device memory but doesn't know the
- * virtual mappings of every page that may be in device memory. For example this
- * is often the case when a driver is being unloaded or unbound from a device.
- *
- * Like migrate_vma_setup() this function will take a reference and lock any
- * migrating pages that aren't free before unmapping them. Drivers may then
- * allocate destination pages and start copying data from the device to CPU
- * memory before calling migrate_device_pages().
- */
-int migrate_device_range(unsigned long *src_pfns, unsigned long start,
-			unsigned long npages)
-{
-	unsigned long i, pfn;
-
-	for (pfn = start, i = 0; i < npages; pfn++, i++)
-		src_pfns[i] = migrate_device_pfn_lock(pfn);
-
-	migrate_device_unmap(src_pfns, npages, NULL);
-
-	return 0;
-}
-EXPORT_SYMBOL(migrate_device_range);
-
-/**
- * migrate_device_pfns() - migrate device private pfns to normal memory.
- * @src_pfns: pre-popluated array of source device private pfns to migrate.
- * @npages: number of pages to migrate.
- *
- * Similar to migrate_device_range() but supports non-contiguous pre-popluated
- * array of device pages to migrate.
- */
-int migrate_device_pfns(unsigned long *src_pfns, unsigned long npages)
-{
+	const unsigned long npages = migrate->npages;
 	unsigned long i;
 
-	for (i = 0; i < npages; i++)
-		src_pfns[i] = migrate_device_pfn_lock(src_pfns[i]);
+	for (i = 0; i < npages; i++) {
+		struct folio *dst, *src;
+		struct page *newpage = migrate_pfn_to_page(migrate->dst[i]);
+		struct page *page = migrate_pfn_to_page(migrate->src[i]);
 
-	migrate_device_unmap(src_pfns, npages, NULL);
+		if (!page) {
+			if (newpage) {
+				unlock_page(newpage);
+				put_page(newpage);
+			}
+			continue;
+		}
 
-	return 0;
-}
-EXPORT_SYMBOL(migrate_device_pfns);
+		if (!(migrate->src[i] & MIGRATE_PFN_MIGRATE) || !newpage) {
+			if (newpage) {
+				unlock_page(newpage);
+				put_page(newpage);
+			}
+			newpage = page;
+		}
 
-/*
- * Migrate a device coherent folio back to normal memory. The caller should have
- * a reference on folio which will be copied to the new folio if migration is
- * successful or dropped on failure.
- */
-int migrate_device_coherent_folio(struct folio *folio)
-{
-	unsigned long src_pfn, dst_pfn = 0;
-	struct folio *dfolio;
+		src = page_folio(page);
+		dst = page_folio(newpage);
+		remove_migration_ptes(src, dst, false);
+		folio_unlock(src);
 
-	WARN_ON_ONCE(folio_test_large(folio));
+		if (is_zone_device_page(page))
+			put_page(page);
+		else
+			putback_lru_page(page);
 
-	folio_lock(folio);
-	src_pfn = migrate_pfn(folio_pfn(folio)) | MIGRATE_PFN_MIGRATE;
-
-	/*
-	 * We don't have a VMA and don't need to walk the page tables to find
-	 * the source folio. So call migrate_vma_unmap() directly to unmap the
-	 * folio as migrate_vma_setup() will fail if args.vma == NULL.
-	 */
-	migrate_device_unmap(&src_pfn, 1, NULL);
-	if (!(src_pfn & MIGRATE_PFN_MIGRATE))
-		return -EBUSY;
-
-	dfolio = folio_alloc(GFP_USER | __GFP_NOWARN, 0);
-	if (dfolio) {
-		folio_lock(dfolio);
-		dst_pfn = migrate_pfn(folio_pfn(dfolio));
+		if (newpage != page) {
+			unlock_page(newpage);
+			if (is_zone_device_page(newpage))
+				put_page(newpage);
+			else
+				putback_lru_page(newpage);
+		}
 	}
-
-	migrate_device_pages(&src_pfn, &dst_pfn, 1);
-	if (src_pfn & MIGRATE_PFN_MIGRATE)
-		folio_copy(dfolio, folio);
-	migrate_device_finalize(&src_pfn, &dst_pfn, 1);
-
-	if (src_pfn & MIGRATE_PFN_MIGRATE)
-		return 0;
-	return -EBUSY;
 }
+EXPORT_SYMBOL(migrate_vma_finalize);

@@ -16,8 +16,7 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/mutex.h>
-#include <linux/of.h>
-#include <linux/platform_device.h>
+#include <linux/of_device.h>
 #include <linux/reset.h>
 #include <linux/slab.h>
 #include <linux/time.h>
@@ -125,7 +124,7 @@ static void hda_tegra_init(struct hda_tegra *hda)
 /*
  * power management
  */
-static int hda_tegra_suspend(struct device *dev)
+static int __maybe_unused hda_tegra_suspend(struct device *dev)
 {
 	struct snd_card *card = dev_get_drvdata(dev);
 	int rc;
@@ -138,7 +137,7 @@ static int hda_tegra_suspend(struct device *dev)
 	return 0;
 }
 
-static int hda_tegra_resume(struct device *dev)
+static int __maybe_unused hda_tegra_resume(struct device *dev)
 {
 	struct snd_card *card = dev_get_drvdata(dev);
 	int rc;
@@ -151,7 +150,7 @@ static int hda_tegra_resume(struct device *dev)
 	return 0;
 }
 
-static int hda_tegra_runtime_suspend(struct device *dev)
+static int __maybe_unused hda_tegra_runtime_suspend(struct device *dev)
 {
 	struct snd_card *card = dev_get_drvdata(dev);
 	struct azx *chip = card->private_data;
@@ -170,7 +169,7 @@ static int hda_tegra_runtime_suspend(struct device *dev)
 	return 0;
 }
 
-static int hda_tegra_runtime_resume(struct device *dev)
+static int __maybe_unused hda_tegra_runtime_resume(struct device *dev)
 {
 	struct snd_card *card = dev_get_drvdata(dev);
 	struct azx *chip = card->private_data;
@@ -204,8 +203,10 @@ static int hda_tegra_runtime_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops hda_tegra_pm = {
-	SYSTEM_SLEEP_PM_OPS(hda_tegra_suspend, hda_tegra_resume)
-	RUNTIME_PM_OPS(hda_tegra_runtime_suspend, hda_tegra_runtime_resume, NULL)
+	SET_SYSTEM_SLEEP_PM_OPS(hda_tegra_suspend, hda_tegra_resume)
+	SET_RUNTIME_PM_OPS(hda_tegra_runtime_suspend,
+			   hda_tegra_runtime_resume,
+			   NULL)
 };
 
 static int hda_tegra_dev_disconnect(struct snd_device *device)
@@ -377,14 +378,14 @@ static int hda_tegra_first_init(struct azx *chip, struct platform_device *pdev)
 	}
 
 	/* driver name */
-	strscpy(card->driver, drv_name, sizeof(card->driver));
+	strncpy(card->driver, drv_name, sizeof(card->driver));
 	/* shortname for card */
 	sname = of_get_property(np, "nvidia,model", NULL);
 	if (!sname)
 		sname = drv_name;
 	if (strlen(sname) > sizeof(card->shortname))
 		dev_info(card->dev, "truncating shortname for card\n");
-	strscpy(card->shortname, sname, sizeof(card->shortname));
+	strncpy(card->shortname, sname, sizeof(card->shortname));
 
 	/* longname for card */
 	snprintf(card->longname, sizeof(card->longname),
@@ -473,8 +474,7 @@ MODULE_DEVICE_TABLE(of, hda_tegra_match);
 static int hda_tegra_probe(struct platform_device *pdev)
 {
 	const unsigned int driver_flags = AZX_DCAPS_CORBRP_SELF_CLEAR |
-					  AZX_DCAPS_PM_RUNTIME |
-					  AZX_DCAPS_4K_BDLE_BOUNDARY;
+					  AZX_DCAPS_PM_RUNTIME;
 	struct snd_card *card;
 	struct azx *chip;
 	struct hda_tegra *hda;
@@ -579,10 +579,14 @@ static void hda_tegra_probe_work(struct work_struct *work)
 	return; /* no error return from async probe */
 }
 
-static void hda_tegra_remove(struct platform_device *pdev)
+static int hda_tegra_remove(struct platform_device *pdev)
 {
-	snd_card_free(dev_get_drvdata(&pdev->dev));
+	int ret;
+
+	ret = snd_card_free(dev_get_drvdata(&pdev->dev));
 	pm_runtime_disable(&pdev->dev);
+
+	return ret;
 }
 
 static void hda_tegra_shutdown(struct platform_device *pdev)
@@ -600,7 +604,7 @@ static void hda_tegra_shutdown(struct platform_device *pdev)
 static struct platform_driver tegra_platform_hda = {
 	.driver = {
 		.name = "tegra-hda",
-		.pm = pm_ptr(&hda_tegra_pm),
+		.pm = &hda_tegra_pm,
 		.of_match_table = hda_tegra_match,
 	},
 	.probe = hda_tegra_probe,

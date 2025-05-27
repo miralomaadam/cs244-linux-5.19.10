@@ -394,9 +394,9 @@ static void skge_get_drvinfo(struct net_device *dev,
 {
 	struct skge_port *skge = netdev_priv(dev);
 
-	strscpy(info->driver, DRV_NAME, sizeof(info->driver));
-	strscpy(info->version, DRV_VERSION, sizeof(info->version));
-	strscpy(info->bus_info, pci_name(skge->hw->pdev),
+	strlcpy(info->driver, DRV_NAME, sizeof(info->driver));
+	strlcpy(info->version, DRV_VERSION, sizeof(info->version));
+	strlcpy(info->bus_info, pci_name(skge->hw->pdev),
 		sizeof(info->bus_info));
 }
 
@@ -484,7 +484,8 @@ static void skge_get_strings(struct net_device *dev, u32 stringset, u8 *data)
 	switch (stringset) {
 	case ETH_SS_STATS:
 		for (i = 0; i < ARRAY_SIZE(skge_stats); i++)
-			ethtool_puts(&data, skge_stats[i].name);
+			memcpy(data + i * ETH_GSTRING_LEN,
+			       skge_stats[i].name, ETH_GSTRING_LEN);
 		break;
 	}
 }
@@ -2662,7 +2663,7 @@ static int skge_down(struct net_device *dev)
 	netif_tx_disable(dev);
 
 	if (is_genesis(hw) && hw->phy_type == SK_PHY_XMAC)
-		timer_delete_sync(&skge->link_timer);
+		del_timer_sync(&skge->link_timer);
 
 	napi_disable(&skge->napi);
 	netif_carrier_off(dev);
@@ -2904,13 +2905,13 @@ static int skge_change_mtu(struct net_device *dev, int new_mtu)
 	int err;
 
 	if (!netif_running(dev)) {
-		WRITE_ONCE(dev->mtu, new_mtu);
+		dev->mtu = new_mtu;
 		return 0;
 	}
 
 	skge_down(dev);
 
-	WRITE_ONCE(dev->mtu, new_mtu);
+	dev->mtu = new_mtu;
 
 	err = skge_up(dev);
 	if (err)
@@ -3742,7 +3743,10 @@ static int skge_device_event(struct notifier_block *unused,
 	skge = netdev_priv(dev);
 	switch (event) {
 	case NETDEV_CHANGENAME:
-		debugfs_change_name(skge->debugfs, "%s", dev->name);
+		if (skge->debugfs)
+			skge->debugfs = debugfs_rename(skge_debug,
+						       skge->debugfs,
+						       skge_debug, dev->name);
 		break;
 
 	case NETDEV_GOING_DOWN:
@@ -3828,7 +3832,7 @@ static struct net_device *skge_devinit(struct skge_hw *hw, int port,
 		dev->features |= NETIF_F_HIGHDMA;
 
 	skge = netdev_priv(dev);
-	netif_napi_add(dev, &skge->napi, skge_poll);
+	netif_napi_add(dev, &skge->napi, skge_poll, NAPI_POLL_WEIGHT);
 	skge->netdev = dev;
 	skge->hw = hw;
 	skge->msg_enable = netif_msg_init(debug, default_msg);

@@ -147,5 +147,5 @@ void img_ir_remove_raw(struct img_ir_priv *priv)
 
 	rc_unregister_device(rdev);
 
-	timer_delete_sync(&raw->timer);
+	del_timer_sync(&raw->timer);
 }

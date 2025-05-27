@@ -11,7 +11,6 @@
 #include <linux/debugfs.h>
 #include <asm/machdep.h>
 #include <asm/hvcall.h>
-#include <asm/firmware.h>
 
 bool dawr_force_enable;
 EXPORT_SYMBOL_GPL(dawr_force_enable);

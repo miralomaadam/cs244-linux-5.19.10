@@ -5,7 +5,6 @@
 #include <linux/irq.h>
 #include <linux/kernel.h>
 #include <linux/ktime.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
@@ -16,7 +15,7 @@
 #include <linux/iio/trigger_consumer.h>
 #include <linux/iio/triggered_buffer.h>
 
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 
 #define MT6360_REG_PMUCHGCTRL3	0x313
 #define MT6360_REG_PMUADCCFG	0x356
@@ -124,7 +123,7 @@ static int mt6360_adc_read_channel(struct mt6360_adc_data *mad, int channel, int
 		usleep_range(ADC_LOOP_TIME_US / 2, ADC_LOOP_TIME_US);
 	}
 
-	*val = get_unaligned_be16(&rpt[1]);
+	*val = rpt[1] << 8 | rpt[2];
 	ret = IIO_VAL_INT;
 
 out_adc_conv:
@@ -268,7 +267,7 @@ static irqreturn_t mt6360_adc_trigger_handler(int irq, void *p)
 	int i = 0, bit, val, ret;
 
 	memset(&data, 0, sizeof(data));
-	iio_for_each_active_channel(indio_dev, bit) {
+	for_each_set_bit(bit, indio_dev->active_scan_mask, indio_dev->masklength) {
 		ret = mt6360_adc_read_channel(mad, bit, &val);
 		if (ret < 0) {
 			dev_warn(&indio_dev->dev, "Failed to get channel %d conversion val\n", bit);
@@ -353,9 +352,9 @@ static int mt6360_adc_probe(struct platform_device *pdev)
 	return devm_iio_device_register(&pdev->dev, indio_dev);
 }
 
-static const struct of_device_id mt6360_adc_of_id[] = {
+static const struct of_device_id __maybe_unused mt6360_adc_of_id[] = {
 	{ .compatible = "mediatek,mt6360-adc", },
-	{ }
+	{}
 };
 MODULE_DEVICE_TABLE(of, mt6360_adc_of_id);
 

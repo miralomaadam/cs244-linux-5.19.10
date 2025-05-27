@@ -415,7 +415,7 @@ static void xive_native_setup_cpu(unsigned int cpu, struct xive_cpu *xc)
 		return;
 	}
 
-	/* Grab its CAM value */
+	/* Grab it's CAM value */
 	rc = opal_xive_get_vp_info(vp, NULL, &vp_cam_be, NULL, NULL);
 	if (rc) {
 		pr_err("Failed to get pool VP info CPU %d\n", cpu);
@@ -535,13 +535,13 @@ static bool __init xive_parse_provisioning(struct device_node *np)
 static void __init xive_native_setup_pools(void)
 {
 	/* Allocate a pool big enough */
-	pr_debug("Allocating VP block for pool size %u\n", nr_cpu_ids);
+	pr_debug("XIVE: Allocating VP block for pool size %u\n", nr_cpu_ids);
 
 	xive_pool_vps = xive_native_alloc_vp_block(nr_cpu_ids);
 	if (WARN_ON(xive_pool_vps == XIVE_INVALID_VP))
-		pr_err("Failed to allocate pool VP, KVM might not function\n");
+		pr_err("XIVE: Failed to allocate pool VP, KVM might not function\n");
 
-	pr_debug("Pool VPs allocated at 0x%x for %u max CPUs\n",
+	pr_debug("XIVE: Pool VPs allocated at 0x%x for %u max CPUs\n",
 		 xive_pool_vps, nr_cpu_ids);
 }
 
@@ -559,7 +559,9 @@ bool __init xive_native_init(void)
 	struct device_node *np;
 	struct resource r;
 	void __iomem *tima;
+	struct property *prop;
 	u8 max_prio = 7;
+	const __be32 *p;
 	u32 val, cpu;
 	s64 rc;
 
@@ -577,12 +579,12 @@ bool __init xive_native_init(void)
 	/* Resource 1 is HV window */
 	if (of_address_to_resource(np, 1, &r)) {
 		pr_err("Failed to get thread mgmnt area resource\n");
-		goto err_put;
+		return false;
 	}
 	tima = ioremap(r.start, resource_size(&r));
 	if (!tima) {
 		pr_err("Failed to map thread mgmnt area\n");
-		goto err_put;
+		return false;
 	}
 
 	/* Read number of priorities */
@@ -590,16 +592,18 @@ bool __init xive_native_init(void)
 		max_prio = val - 1;
 
 	/* Iterate the EQ sizes and pick one */
-	of_property_for_each_u32(np, "ibm,xive-eq-sizes", val) {
+	of_property_for_each_u32(np, "ibm,xive-eq-sizes", prop, p, val) {
 		xive_queue_shift = val;
 		if (val == PAGE_SHIFT)
 			break;
 	}
 
 	/* Do we support single escalation */
-	xive_has_single_esc = of_property_read_bool(np, "single-escalation-support");
+	if (of_get_property(np, "single-escalation-support", NULL) != NULL)
+		xive_has_single_esc = true;
 
-	xive_has_save_restore = of_property_read_bool(np, "vp-save-restore");
+	if (of_get_property(np, "vp-save-restore", NULL))
+		xive_has_save_restore = true;
 
 	/* Configure Thread Management areas for KVM */
 	for_each_possible_cpu(cpu)
@@ -608,7 +612,7 @@ bool __init xive_native_init(void)
 	/* Resource 2 is OS window */
 	if (of_address_to_resource(np, 2, &r)) {
 		pr_err("Failed to get thread mgmnt area resource\n");
-		goto err_put;
+		return false;
 	}
 
 	xive_tima_os = r.start;
@@ -620,7 +624,7 @@ bool __init xive_native_init(void)
 	rc = opal_xive_reset(OPAL_XIVE_MODE_EXPL);
 	if (rc) {
 		pr_err("Switch to exploitation mode failed with error %lld\n", rc);
-		goto err_put;
+		return false;
 	}
 
 	/* Setup some dummy HV pool VPs */
@@ -630,15 +634,10 @@ bool __init xive_native_init(void)
 	if (!xive_core_init(np, &xive_native_ops, tima, TM_QW3_HV_PHYS,
 			    max_prio)) {
 		opal_xive_reset(OPAL_XIVE_MODE_EMU);
-		goto err_put;
+		return false;
 	}
-	of_node_put(np);
 	pr_info("Using %dkB queues\n", 1 << (xive_queue_shift - 10));
 	return true;
-
-err_put:
-	of_node_put(np);
-	return false;
 }
 
 static bool xive_native_provision_pages(void)
@@ -800,7 +799,7 @@ int xive_native_get_queue_info(u32 vp_id, u32 prio,
 	if (out_qpage)
 		*out_qpage = be64_to_cpu(qpage);
 	if (out_qsize)
-		*out_qsize = be64_to_cpu(qsize);
+		*out_qsize = be32_to_cpu(qsize);
 	if (out_qeoi_page)
 		*out_qeoi_page = be64_to_cpu(qeoi_page);
 	if (out_escalate_irq)

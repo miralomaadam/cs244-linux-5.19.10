@@ -9,7 +9,7 @@
  * tree nodes are listed in this file.
  */
 
-#include "exynos-pinctrl.h"
+#include <dt-bindings/pinctrl/samsung.h>
 
 #define PIN(_pin, _func, _pull, _drv)					\
 	pin- ## _pin {							\

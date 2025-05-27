@@ -950,7 +950,7 @@ static void __init mpc5121_clk_register_of_provider(struct device_node *np)
  */
 static void __init mpc5121_clk_provide_migration_support(void)
 {
-	struct device_node *np;
+
 	/*
 	 * pre-enable those clock items which are not yet appropriately
 	 * acquired by their peripheral driver
@@ -970,9 +970,7 @@ static void __init mpc5121_clk_provide_migration_support(void)
 	 * unused and so it gets disabled
 	 */
 	clk_prepare_enable(clks[MPC512x_CLK_PSC3_MCLK]);/* serial console */
-	np = of_find_compatible_node(NULL, "pci", "fsl,mpc5121-pci");
-	of_node_put(np);
-	if (np)
+	if (of_find_compatible_node(NULL, "pci", "fsl,mpc5121-pci"))
 		clk_prepare_enable(clks[MPC512x_CLK_PCI]);
 }
 
@@ -986,7 +984,7 @@ static void __init mpc5121_clk_provide_migration_support(void)
 
 #define NODE_PREP do { \
 	of_address_to_resource(np, 0, &res); \
-	snprintf(devname, sizeof(devname), "%pa.%s", &res.start, np->name); \
+	snprintf(devname, sizeof(devname), "%08x.%s", res.start, np->name); \
 } while (0)
 
 #define NODE_CHK(clkname, clkitem, regnode, regflag) do { \
@@ -1209,8 +1207,6 @@ int __init mpc5121_clk_init(void)
 
 	/* register as an OF clock provider */
 	mpc5121_clk_register_of_provider(clk_np);
-
-	of_node_put(clk_np);
 
 	/*
 	 * unbreak not yet adjusted peripheral drivers during migration

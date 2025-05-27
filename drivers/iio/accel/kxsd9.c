@@ -15,7 +15,6 @@
 #include <linux/kernel.h>
 #include <linux/sysfs.h>
 #include <linux/slab.h>
-#include <linux/types.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 #include <linux/bitops.h>
@@ -216,7 +215,7 @@ static irqreturn_t kxsd9_trigger_handler(int irq, void *p)
 	 */
 	struct {
 		__be16 chan[4];
-		aligned_s64 ts;
+		s64 ts __aligned(8);
 	} hw_values;
 	int ret;
 
@@ -371,7 +370,10 @@ static int kxsd9_power_down(struct kxsd9_state *st)
 	 * make sure we conserve power even if there are others users on the
 	 * regulators.
 	 */
-	ret = regmap_clear_bits(st->map, KXSD9_REG_CTRL_B, KXSD9_CTRL_B_ENABLE);
+	ret = regmap_update_bits(st->map,
+				 KXSD9_REG_CTRL_B,
+				 KXSD9_CTRL_B_ENABLE,
+				 0);
 	if (ret)
 		return ret;
 
@@ -474,7 +476,7 @@ err_power_down:
 
 	return ret;
 }
-EXPORT_SYMBOL_NS(kxsd9_common_probe, "IIO_KXSD9");
+EXPORT_SYMBOL_NS(kxsd9_common_probe, IIO_KXSD9);
 
 void kxsd9_common_remove(struct device *dev)
 {
@@ -488,8 +490,9 @@ void kxsd9_common_remove(struct device *dev)
 	pm_runtime_disable(dev);
 	kxsd9_power_down(st);
 }
-EXPORT_SYMBOL_NS(kxsd9_common_remove, "IIO_KXSD9");
+EXPORT_SYMBOL_NS(kxsd9_common_remove, IIO_KXSD9);
 
+#ifdef CONFIG_PM
 static int kxsd9_runtime_suspend(struct device *dev)
 {
 	struct iio_dev *indio_dev = dev_get_drvdata(dev);
@@ -505,9 +508,15 @@ static int kxsd9_runtime_resume(struct device *dev)
 
 	return kxsd9_power_up(st);
 }
+#endif /* CONFIG_PM */
 
-EXPORT_NS_RUNTIME_DEV_PM_OPS(kxsd9_dev_pm_ops, kxsd9_runtime_suspend,
-			     kxsd9_runtime_resume, NULL, IIO_KXSD9);
+const struct dev_pm_ops kxsd9_dev_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
+				pm_runtime_force_resume)
+	SET_RUNTIME_PM_OPS(kxsd9_runtime_suspend,
+			   kxsd9_runtime_resume, NULL)
+};
+EXPORT_SYMBOL_NS(kxsd9_dev_pm_ops, IIO_KXSD9);
 
 MODULE_AUTHOR("Jonathan Cameron <jic23@kernel.org>");
 MODULE_DESCRIPTION("Kionix KXSD9 driver");

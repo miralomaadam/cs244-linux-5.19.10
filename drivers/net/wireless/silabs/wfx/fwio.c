@@ -286,7 +286,8 @@ static int load_firmware_secure(struct wfx_dev *wdev)
 
 error:
 	kfree(buf);
-	release_firmware(fw);
+	if (fw)
+		release_firmware(fw);
 	if (ret)
 		print_boot_status(wdev);
 	return ret;

@@ -127,16 +127,6 @@ static void octeon_irq_free_cd(struct irq_domain *d, unsigned int irq)
 static int octeon_irq_force_ciu_mapping(struct irq_domain *domain,
 					int irq, int line, int bit)
 {
-	struct device_node *of_node;
-	int ret;
-
-	of_node = irq_domain_get_of_node(domain);
-	if (!of_node)
-		return -EINVAL;
-	ret = irq_alloc_desc_at(irq, of_node_to_nid(of_node));
-	if (ret < 0)
-		return ret;
-
 	return irq_domain_associate(domain, irq, line << 6 | bit);
 }
 
@@ -273,7 +263,7 @@ static int next_cpu_for_irq(struct irq_data *data)
 
 #ifdef CONFIG_SMP
 	int cpu;
-	const struct cpumask *mask = irq_data_get_affinity_mask(data);
+	struct cpumask *mask = irq_data_get_affinity_mask(data);
 	int weight = cpumask_weight(mask);
 	struct octeon_ciu_chip_data *cd = irq_data_get_irq_chip_data(data);
 
@@ -768,7 +758,7 @@ static void octeon_irq_cpu_offline_ciu(struct irq_data *data)
 {
 	int cpu = smp_processor_id();
 	cpumask_t new_affinity;
-	const struct cpumask *mask = irq_data_get_affinity_mask(data);
+	struct cpumask *mask = irq_data_get_affinity_mask(data);
 
 	if (!cpumask_test_cpu(cpu, mask))
 		return;
@@ -1505,7 +1495,7 @@ static int __init octeon_irq_init_ciu(
 
 	ciu_domain = irq_domain_add_tree(
 		ciu_node, &octeon_irq_domain_ciu_ops, dd);
-	irq_set_default_domain(ciu_domain);
+	irq_set_default_host(ciu_domain);
 
 	/* CIU_0 */
 	for (i = 0; i < 16; i++) {
@@ -2076,7 +2066,7 @@ static int __init octeon_irq_init_ciu2(
 
 	ciu_domain = irq_domain_add_tree(
 		ciu_node, &octeon_irq_domain_ciu2_ops, NULL);
-	irq_set_default_domain(ciu_domain);
+	irq_set_default_host(ciu_domain);
 
 	/* CUI2 */
 	for (i = 0; i < 64; i++) {
@@ -2290,7 +2280,7 @@ static irqreturn_t octeon_irq_cib_handler(int my_irq, void *data)
 static int __init octeon_irq_init_cib(struct device_node *ciu_node,
 				      struct device_node *parent)
 {
-	struct resource res;
+	const __be32 *addr;
 	u32 val;
 	struct octeon_irq_cib_host_data *host_data;
 	int parent_irq;
@@ -2309,19 +2299,21 @@ static int __init octeon_irq_init_cib(struct device_node *ciu_node,
 		return -ENOMEM;
 	raw_spin_lock_init(&host_data->lock);
 
-	r = of_address_to_resource(ciu_node, 0, &res);
-	if (r) {
+	addr = of_get_address(ciu_node, 0, NULL, NULL);
+	if (!addr) {
 		pr_err("ERROR: Couldn't acquire reg(0) %pOFn\n", ciu_node);
-		return r;
+		return -EINVAL;
 	}
-	host_data->raw_reg = (u64)phys_to_virt(res.start);
+	host_data->raw_reg = (u64)phys_to_virt(
+		of_translate_address(ciu_node, addr));
 
-	r = of_address_to_resource(ciu_node, 1, &res);
-	if (r) {
+	addr = of_get_address(ciu_node, 1, NULL, NULL);
+	if (!addr) {
 		pr_err("ERROR: Couldn't acquire reg(1) %pOFn\n", ciu_node);
-		return r;
+		return -EINVAL;
 	}
-	host_data->en_reg = (u64)phys_to_virt(res.start);
+	host_data->en_reg = (u64)phys_to_virt(
+		of_translate_address(ciu_node, addr));
 
 	r = of_property_read_u32(ciu_node, "cavium,max-bits", &val);
 	if (r) {
@@ -2872,11 +2864,11 @@ static struct irq_chip octeon_irq_chip_ciu3_mbox = {
 static int __init octeon_irq_init_ciu3(struct device_node *ciu_node,
 				       struct device_node *parent)
 {
-	int i, ret;
+	int i;
 	int node;
 	struct irq_domain *domain;
 	struct octeon_ciu3_info *ciu3_info;
-	struct resource res;
+	const __be32 *zero_addr;
 	u64 base_addr;
 	union cvmx_ciu3_const consts;
 
@@ -2886,11 +2878,14 @@ static int __init octeon_irq_init_ciu3(struct device_node *ciu_node,
 	if (!ciu3_info)
 		return -ENOMEM;
 
-	ret = of_address_to_resource(ciu_node, 0, &res);
-	if (WARN_ON(ret))
-		return ret;
+	zero_addr = of_get_address(ciu_node, 0, NULL, NULL);
+	if (WARN_ON(!zero_addr))
+		return -EINVAL;
 
-	ciu3_info->ciu3_addr = base_addr = (u64)phys_to_virt(res.start);
+	base_addr = of_translate_address(ciu_node, zero_addr);
+	base_addr = (u64)phys_to_virt(base_addr);
+
+	ciu3_info->ciu3_addr = base_addr;
 	ciu3_info->node = node;
 
 	consts.u64 = cvmx_read_csr(base_addr + CIU3_CONST);
@@ -2929,7 +2924,7 @@ static int __init octeon_irq_init_ciu3(struct device_node *ciu_node,
 		/* Only do per CPU things if it is the CIU of the boot node. */
 		octeon_irq_ciu3_alloc_resources(ciu3_info);
 		if (node == 0)
-			irq_set_default_domain(domain);
+			irq_set_default_host(domain);
 
 		octeon_irq_use_ip4 = false;
 		/* Enable the CIU lines */

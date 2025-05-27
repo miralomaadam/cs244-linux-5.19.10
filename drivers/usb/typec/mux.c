@@ -29,11 +29,11 @@ static int switch_fwnode_match(struct device *dev, const void *fwnode)
 	if (!is_typec_switch_dev(dev))
 		return 0;
 
-	return device_match_fwnode(dev, fwnode);
+	return dev_fwnode(dev) == fwnode;
 }
 
-static void *typec_switch_match(const struct fwnode_handle *fwnode,
-				const char *id, void *data)
+static void *typec_switch_match(struct fwnode_handle *fwnode, const char *id,
+				void *data)
 {
 	struct device *dev;
 
@@ -259,25 +259,62 @@ static int mux_fwnode_match(struct device *dev, const void *fwnode)
 	if (!is_typec_mux_dev(dev))
 		return 0;
 
-	return device_match_fwnode(dev, fwnode);
+	return dev_fwnode(dev) == fwnode;
 }
 
-static void *typec_mux_match(const struct fwnode_handle *fwnode,
-			     const char *id, void *data)
+static void *typec_mux_match(struct fwnode_handle *fwnode, const char *id,
+			     void *data)
 {
+	const struct typec_altmode_desc *desc = data;
 	struct device *dev;
+	bool match;
+	int nval;
+	u16 *val;
+	int ret;
+	int i;
 
 	/*
-	 * Device graph (OF graph) does not give any means to identify the
-	 * device type or the device class of the remote port parent that @fwnode
-	 * represents, so in order to identify the type or the class of @fwnode
-	 * an additional device property is needed. With typec muxes the
-	 * property is named "mode-switch" (@id). The value of the device
-	 * property is ignored.
+	 * Check has the identifier already been "consumed". If it
+	 * has, no need to do any extra connection identification.
 	 */
-	if (id && !fwnode_property_present(fwnode, id))
+	match = !id;
+	if (match)
+		goto find_mux;
+
+	/* Accessory Mode muxes */
+	if (!desc) {
+		match = fwnode_property_present(fwnode, "accessory");
+		if (match)
+			goto find_mux;
+		return NULL;
+	}
+
+	/* Alternate Mode muxes */
+	nval = fwnode_property_count_u16(fwnode, "svid");
+	if (nval <= 0)
 		return NULL;
 
+	val = kcalloc(nval, sizeof(*val), GFP_KERNEL);
+	if (!val)
+		return ERR_PTR(-ENOMEM);
+
+	ret = fwnode_property_read_u16_array(fwnode, "svid", val, nval);
+	if (ret < 0) {
+		kfree(val);
+		return ERR_PTR(ret);
+	}
+
+	for (i = 0; i < nval; i++) {
+		match = val[i] == desc->svid;
+		if (match) {
+			kfree(val);
+			goto find_mux;
+		}
+	}
+	kfree(val);
+	return NULL;
+
+find_mux:
 	dev = class_find_device(&typec_mux_class, NULL, fwnode,
 				mux_fwnode_match);
 
@@ -287,13 +324,15 @@ static void *typec_mux_match(const struct fwnode_handle *fwnode,
 /**
  * fwnode_typec_mux_get - Find USB Type-C Multiplexer
  * @fwnode: The caller device node
+ * @desc: Alt Mode description
  *
  * Finds a mux linked to the caller. This function is primarily meant for the
  * Type-C drivers. Returns a reference to the mux on success, NULL if no
  * matching connection was found, or ERR_PTR(-EPROBE_DEFER) when a connection
  * was found but the mux has not been enumerated yet.
  */
-struct typec_mux *fwnode_typec_mux_get(struct fwnode_handle *fwnode)
+struct typec_mux *fwnode_typec_mux_get(struct fwnode_handle *fwnode,
+				       const struct typec_altmode_desc *desc)
 {
 	struct typec_mux_dev *mux_devs[TYPEC_MUX_MAX_DEVS];
 	struct typec_mux *mux;
@@ -306,7 +345,7 @@ struct typec_mux *fwnode_typec_mux_get(struct fwnode_handle *fwnode)
 		return ERR_PTR(-ENOMEM);
 
 	count = fwnode_connection_find_matches(fwnode, "mode-switch",
-					       NULL, typec_mux_match,
+					       (void *)desc, typec_mux_match,
 					       (void **)mux_devs,
 					       ARRAY_SIZE(mux_devs));
 	if (count <= 0) {
@@ -469,6 +508,7 @@ void *typec_mux_get_drvdata(struct typec_mux_dev *mux_dev)
 }
 EXPORT_SYMBOL_GPL(typec_mux_get_drvdata);
 
-const struct class typec_mux_class = {
+struct class typec_mux_class = {
 	.name = "typec_mux",
+	.owner = THIS_MODULE,
 };

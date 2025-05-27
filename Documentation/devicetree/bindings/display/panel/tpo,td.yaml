@@ -22,16 +22,11 @@ properties:
         # Toppoly TD043MTEA1 Panel
       - tpo,td043mtea1
 
-  reg:
-    maxItems: 1
-
+  reg: true
   label: true
   reset-gpios: true
   backlight: true
   port: true
-
-  spi-cpha: true
-  spi-cpol: true
 
 required:
   - compatible

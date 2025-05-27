@@ -8,6 +8,7 @@
 
 #include <linux/kernel.h>
 #include <linux/blkdev.h>
+#include <linux/blk-mq.h>
 #include <linux/module.h>
 #include <linux/sbitmap.h>
 
@@ -18,6 +19,7 @@
 #include "blk-mq.h"
 #include "blk-mq-debugfs.h"
 #include "blk-mq-sched.h"
+#include "blk-mq-tag.h"
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/kyber.h>
@@ -193,9 +195,9 @@ struct kyber_hctx_data {
 static int kyber_domain_wake(wait_queue_entry_t *wait, unsigned mode, int flags,
 			     void *key);
 
-static unsigned int kyber_sched_domain(blk_opf_t opf)
+static unsigned int kyber_sched_domain(unsigned int op)
 {
-	switch (opf & REQ_OP_MASK) {
+	switch (op & REQ_OP_MASK) {
 	case REQ_OP_READ:
 		return KYBER_READ;
 	case REQ_OP_WRITE:
@@ -432,7 +434,7 @@ static void kyber_exit_sched(struct elevator_queue *e)
 	struct kyber_queue_data *kqd = e->elevator_data;
 	int i;
 
-	timer_shutdown_sync(&kqd->timer);
+	del_timer_sync(&kqd->timer);
 	blk_stat_disable_accounting(kqd->q);
 
 	for (i = 0; i < KYBER_NUM_DOMAINS; i++)
@@ -551,13 +553,13 @@ static void rq_clear_domain_token(struct kyber_queue_data *kqd,
 	}
 }
 
-static void kyber_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
+static void kyber_limit_depth(unsigned int op, struct blk_mq_alloc_data *data)
 {
 	/*
 	 * We use the scheduler tags as per-hardware queue queueing tokens.
 	 * Async requests can be limited at this stage.
 	 */
-	if (!op_is_sync(opf)) {
+	if (!op_is_sync(op)) {
 		struct kyber_queue_data *kqd = data->q->elevator->elevator_data;
 
 		data->shallow_depth = kqd->async_depth;
@@ -568,7 +570,7 @@ static bool kyber_bio_merge(struct request_queue *q, struct bio *bio,
 		unsigned int nr_segs)
 {
 	struct blk_mq_ctx *ctx = blk_mq_get_ctx(q);
-	struct blk_mq_hw_ctx *hctx = blk_mq_map_queue(bio->bi_opf, ctx);
+	struct blk_mq_hw_ctx *hctx = blk_mq_map_queue(q, bio->bi_opf, ctx);
 	struct kyber_hctx_data *khd = hctx->sched_data;
 	struct kyber_ctx_queue *kcq = &khd->kcqs[ctx->index_hw[hctx->type]];
 	unsigned int sched_domain = kyber_sched_domain(bio->bi_opf);
@@ -588,8 +590,7 @@ static void kyber_prepare_request(struct request *rq)
 }
 
 static void kyber_insert_requests(struct blk_mq_hw_ctx *hctx,
-				  struct list_head *rq_list,
-				  blk_insert_t flags)
+				  struct list_head *rq_list, bool at_head)
 {
 	struct kyber_hctx_data *khd = hctx->sched_data;
 	struct request *rq, *next;
@@ -601,7 +602,7 @@ static void kyber_insert_requests(struct blk_mq_hw_ctx *hctx,
 
 		spin_lock(&kcq->lock);
 		trace_block_rq_insert(rq);
-		if (flags & BLK_MQ_INSERT_AT_HEAD)
+		if (at_head)
 			list_move(&rq->queuelist, head);
 		else
 			list_move_tail(&rq->queuelist, head);
@@ -889,7 +890,7 @@ KYBER_LAT_SHOW_STORE(KYBER_WRITE, write);
 #undef KYBER_LAT_SHOW_STORE
 
 #define KYBER_LAT_ATTR(op) __ATTR(op##_lat_nsec, 0644, kyber_##op##_lat_show, kyber_##op##_lat_store)
-static const struct elv_fs_entry kyber_sched_attrs[] = {
+static struct elv_fs_entry kyber_sched_attrs[] = {
 	KYBER_LAT_ATTR(read),
 	KYBER_LAT_ATTR(write),
 	__ATTR_NULL

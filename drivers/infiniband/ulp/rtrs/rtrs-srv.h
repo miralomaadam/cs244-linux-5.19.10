@@ -12,7 +12,6 @@
 
 #include <linux/device.h>
 #include <linux/refcount.h>
-#include <linux/percpu.h>
 #include "rtrs-pri.h"
 
 /*
@@ -30,15 +29,15 @@ enum rtrs_srv_state {
  */
 struct rtrs_srv_stats_rdma_stats {
 	struct {
-		u64 cnt;
-		u64 size_total;
+		atomic64_t	cnt;
+		atomic64_t	size_total;
 	} dir[2];
 };
 
 struct rtrs_srv_stats {
-	struct kobject					kobj_stats;
-	struct rtrs_srv_stats_rdma_stats __percpu	*rdma_stats;
-	struct rtrs_srv_path				*srv_path;
+	struct kobject				kobj_stats;
+	struct rtrs_srv_stats_rdma_stats	rdma_stats;
+	struct rtrs_srv_path			*srv_path;
 };
 
 struct rtrs_srv_con {
@@ -91,11 +90,6 @@ struct rtrs_srv_path {
 	struct rtrs_srv_stats	*stats;
 };
 
-static inline struct rtrs_srv_path *to_srv_path(struct rtrs_path *s)
-{
-	return container_of(s, struct rtrs_srv_path, s);
-}
-
 struct rtrs_srv_sess {
 	struct list_head	paths_list;
 	int			paths_up;
@@ -129,17 +123,15 @@ struct rtrs_srv_ib_ctx {
 	int			ib_dev_count;
 };
 
-extern const struct class rtrs_dev_class;
+extern struct class *rtrs_dev_class;
 
 void close_path(struct rtrs_srv_path *srv_path);
-void rtrs_srv_ib_event_handler(struct ib_event_handler *handler,
-			       struct ib_event *ibevent);
 
 static inline void rtrs_srv_update_rdma_stats(struct rtrs_srv_stats *s,
 					      size_t size, int d)
 {
-	this_cpu_inc(s->rdma_stats->dir[d].cnt);
-	this_cpu_add(s->rdma_stats->dir[d].size_total, size);
+	atomic64_inc(&s->rdma_stats.dir[d].cnt);
+	atomic64_add(size, &s->rdma_stats.dir[d].size_total);
 }
 
 /* functions which are implemented in rtrs-srv-stats.c */

@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause-Clear */
 /*
  * Copyright (c) 2018-2019 The Linux Foundation. All rights reserved.
- * Copyright (c) 2021-2022, 2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #ifndef ATH11K_HAL_H
@@ -243,7 +243,7 @@ struct ath11k_base;
 #define HAL_WBM0_RELEASE_RING_HP		0x000030c0
 #define HAL_WBM1_RELEASE_RING_HP		0x000030c8
 
-/* TCL ring field mask and offset */
+/* TCL ring feild mask and offset */
 #define HAL_TCL1_RING_BASE_MSB_RING_SIZE		GENMASK(27, 8)
 #define HAL_TCL1_RING_BASE_MSB_RING_BASE_ADDR_MSB	GENMASK(7, 0)
 #define HAL_TCL1_RING_ID_ENTRY_SIZE			GENMASK(7, 0)
@@ -268,7 +268,7 @@ struct ath11k_base;
 #define HAL_TCL1_RING_FIELD_DSCP_TID_MAP6		GENMASK(20, 18)
 #define HAL_TCL1_RING_FIELD_DSCP_TID_MAP7		GENMASK(23, 21)
 
-/* REO ring field mask and offset */
+/* REO ring feild mask and offset */
 #define HAL_REO1_RING_BASE_MSB_RING_SIZE		GENMASK(27, 8)
 #define HAL_REO1_RING_BASE_MSB_RING_BASE_ADDR_MSB	GENMASK(7, 0)
 #define HAL_REO1_RING_ID_RING_ID			GENMASK(15, 8)
@@ -320,10 +320,6 @@ struct ath11k_base;
 #define HAL_SW2WBM_RELEASE_RING_BASE_MSB_RING_SIZE	0x0000ffff
 #define HAL_WBM2SW_RELEASE_RING_BASE_MSB_RING_SIZE	0x000fffff
 #define HAL_RXDMA_RING_MAX_SIZE				0x0000ffff
-
-/* IPQ5018 ce registers */
-#define HAL_IPQ5018_CE_WFSS_REG_BASE		0x08400000
-#define HAL_IPQ5018_CE_SIZE			0x200000
 
 /* Add any other errors here and return them in
  * ath11k_hal_rx_desc_get_err().
@@ -393,7 +389,6 @@ enum hal_srng_ring_id {
 	HAL_SRNG_RING_ID_WBM2SW1_RELEASE,
 	HAL_SRNG_RING_ID_WBM2SW2_RELEASE,
 	HAL_SRNG_RING_ID_WBM2SW3_RELEASE,
-	HAL_SRNG_RING_ID_WBM2SW4_RELEASE,
 
 	HAL_SRNG_RING_ID_UMAC_ID_END = 127,
 	HAL_SRNG_RING_ID_LMAC1_ID_START,
@@ -455,13 +450,13 @@ enum hal_ring_type {
 
 /**
  * enum hal_reo_cmd_type: Enum for REO command type
- * @HAL_REO_CMD_GET_QUEUE_STATS: Get REO queue status/stats
- * @HAL_REO_CMD_FLUSH_QUEUE: Flush all frames in REO queue
- * @HAL_REO_CMD_FLUSH_CACHE: Flush descriptor entries in the cache
- * @HAL_REO_CMD_UNBLOCK_CACHE: Unblock a descriptor's address that was blocked
+ * @CMD_GET_QUEUE_STATS: Get REO queue status/stats
+ * @CMD_FLUSH_QUEUE: Flush all frames in REO queue
+ * @CMD_FLUSH_CACHE: Flush descriptor entries in the cache
+ * @CMD_UNBLOCK_CACHE: Unblock a descriptor's address that was blocked
  *      earlier with a 'REO_FLUSH_CACHE' command
- * @HAL_REO_CMD_FLUSH_TIMEOUT_LIST: Flush buffers/descriptors from timeout list
- * @HAL_REO_CMD_UPDATE_RX_QUEUE: Update REO queue settings
+ * @CMD_FLUSH_TIMEOUT_LIST: Flush buffers/descriptors from timeout list
+ * @CMD_UPDATE_RX_REO_QUEUE: Update REO queue settings
  */
 enum hal_reo_cmd_type {
 	HAL_REO_CMD_GET_QUEUE_STATS     = 0,
@@ -523,7 +518,6 @@ enum hal_srng_dir {
 #define HAL_SRNG_FLAGS_MSI_INTR			0x00020000
 #define HAL_SRNG_FLAGS_CACHED                   0x20000000
 #define HAL_SRNG_FLAGS_LMAC_RING		0x80000000
-#define HAL_SRNG_FLAGS_REMAP_CE_RING        0x10000000
 
 #define HAL_SRNG_TLV_HDR_TAG		GENMASK(9, 1)
 #define HAL_SRNG_TLV_HDR_LEN		GENMASK(25, 10)
@@ -641,7 +635,7 @@ struct hal_srng {
 	} u;
 };
 
-/* Interrupt mitigation - Batch threshold in terms of number of frames */
+/* Interrupt mitigation - Batch threshold in terms of numer of frames */
 #define HAL_SRNG_INT_BATCH_THRESHOLD_TX 256
 #define HAL_SRNG_INT_BATCH_THRESHOLD_RX 128
 #define HAL_SRNG_INT_BATCH_THRESHOLD_OTHER 1
@@ -664,7 +658,7 @@ struct hal_srng_config {
 };
 
 /**
- * enum hal_rx_buf_return_buf_manager - manager for returned rx buffers
+ * enum hal_rx_buf_return_buf_manager
  *
  * @HAL_RX_BUF_RBM_WBM_IDLE_BUF_LIST: Buffer returned to WBM idle buffer list
  * @HAL_RX_BUF_RBM_WBM_IDLE_DESC_LIST: Descriptor returned to WBM idle
@@ -674,7 +668,6 @@ struct hal_srng_config {
  * @HAL_RX_BUF_RBM_SW1_BM: For Tx completion -- returned to host
  * @HAL_RX_BUF_RBM_SW2_BM: For Tx completion -- returned to host
  * @HAL_RX_BUF_RBM_SW3_BM: For Rx release -- returned to host
- * @HAL_RX_BUF_RBM_SW4_BM: For Tx completion -- returned to host
  */
 
 enum hal_rx_buf_return_buf_manager {
@@ -685,7 +678,6 @@ enum hal_rx_buf_return_buf_manager {
 	HAL_RX_BUF_RBM_SW1_BM,
 	HAL_RX_BUF_RBM_SW2_BM,
 	HAL_RX_BUF_RBM_SW3_BM,
-	HAL_RX_BUF_RBM_SW4_BM,
 };
 
 #define HAL_SRNG_DESC_LOOP_CNT		0xf0000000
@@ -700,7 +692,7 @@ enum hal_rx_buf_return_buf_manager {
 #define HAL_REO_CMD_FLG_UNBLK_RESOURCE		BIT(7)
 #define HAL_REO_CMD_FLG_UNBLK_CACHE		BIT(8)
 
-/* Should be matching with HAL_REO_UPD_RX_QUEUE_INFO0_UPD_* fields */
+/* Should be matching with HAL_REO_UPD_RX_QUEUE_INFO0_UPD_* feilds */
 #define HAL_REO_CMD_UPD0_RX_QUEUE_NUM		BIT(8)
 #define HAL_REO_CMD_UPD0_VLD			BIT(9)
 #define HAL_REO_CMD_UPD0_ALDC			BIT(10)
@@ -725,7 +717,7 @@ enum hal_rx_buf_return_buf_manager {
 #define HAL_REO_CMD_UPD0_PN_VALID		BIT(29)
 #define HAL_REO_CMD_UPD0_PN			BIT(30)
 
-/* Should be matching with HAL_REO_UPD_RX_QUEUE_INFO1_* fields */
+/* Should be matching with HAL_REO_UPD_RX_QUEUE_INFO1_* feilds */
 #define HAL_REO_CMD_UPD1_VLD			BIT(16)
 #define HAL_REO_CMD_UPD1_ALDC			GENMASK(18, 17)
 #define HAL_REO_CMD_UPD1_DIS_DUP_DETECTION	BIT(19)
@@ -741,7 +733,7 @@ enum hal_rx_buf_return_buf_manager {
 #define HAL_REO_CMD_UPD1_PN_HANDLE_ENABLE	BIT(30)
 #define HAL_REO_CMD_UPD1_IGNORE_AMPDU_FLG	BIT(31)
 
-/* Should be matching with HAL_REO_UPD_RX_QUEUE_INFO2_* fields */
+/* Should be matching with HAL_REO_UPD_RX_QUEUE_INFO2_* feilds */
 #define HAL_REO_CMD_UPD2_SVLD			BIT(10)
 #define HAL_REO_CMD_UPD2_SSN			GENMASK(22, 11)
 #define HAL_REO_CMD_UPD2_SEQ_2K_ERR		BIT(23)
@@ -881,7 +873,8 @@ struct hal_reo_status {
 	} u;
 };
 
-/* HAL context to be used to access SRNG APIs (currently used by data path
+/**
+ * HAL context to be used to access SRNG APIs (currently used by data path
  * and transport (CE) modules)
  */
 struct ath11k_hal {
@@ -947,8 +940,6 @@ u32 *ath11k_hal_srng_dst_peek(struct ath11k_base *ab, struct hal_srng *srng);
 int ath11k_hal_srng_dst_num_free(struct ath11k_base *ab, struct hal_srng *srng,
 				 bool sync_hw_ptr);
 u32 *ath11k_hal_srng_src_peek(struct ath11k_base *ab, struct hal_srng *srng);
-u32 *ath11k_hal_srng_src_next_peek(struct ath11k_base *ab,
-				   struct hal_srng *srng);
 u32 *ath11k_hal_srng_src_get_next_reaped(struct ath11k_base *ab,
 					 struct hal_srng *srng);
 u32 *ath11k_hal_srng_src_reap_next(struct ath11k_base *ab,

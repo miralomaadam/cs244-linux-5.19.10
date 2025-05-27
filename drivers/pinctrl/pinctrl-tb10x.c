@@ -804,11 +804,13 @@ fail:
 	return ret;
 }
 
-static void tb10x_pinctrl_remove(struct platform_device *pdev)
+static int tb10x_pinctrl_remove(struct platform_device *pdev)
 {
 	struct tb10x_pinctrl *state = platform_get_drvdata(pdev);
 
 	mutex_destroy(&state->mutex);
+
+	return 0;
 }
 
 
@@ -830,5 +832,4 @@ static struct platform_driver tb10x_pinctrl_pdrv = {
 module_platform_driver(tb10x_pinctrl_pdrv);
 
 MODULE_AUTHOR("Christian Ruppert <christian.ruppert@abilis.com>");
-MODULE_DESCRIPTION("Abilis Systems TB10x pinctrl driver");
 MODULE_LICENSE("GPL");

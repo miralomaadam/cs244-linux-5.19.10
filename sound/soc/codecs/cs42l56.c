@@ -20,7 +20,7 @@
 #include <linux/workqueue.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/of_gpio.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -757,10 +757,10 @@ static int cs42l56_set_dai_fmt(struct snd_soc_dai *codec_dai, unsigned int fmt)
 	struct cs42l56_private *cs42l56 = snd_soc_component_get_drvdata(component);
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBP_CFP:
+	case SND_SOC_DAIFMT_CBM_CFM:
 		cs42l56->iface = CS42L56_MASTER_MODE;
 		break;
-	case SND_SOC_DAIFMT_CBC_CFC:
+	case SND_SOC_DAIFMT_CBS_CFS:
 		cs42l56->iface = CS42L56_SLAVE_MODE;
 		break;
 	default:
@@ -1114,6 +1114,7 @@ static const struct snd_soc_component_driver soc_component_dev_cs42l56 = {
 	.idle_bias_on		= 1,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
+	.non_legacy_dai_naming	= 1,
 };
 
 static const struct regmap_config cs42l56_regmap = {
@@ -1125,7 +1126,7 @@ static const struct regmap_config cs42l56_regmap = {
 	.num_reg_defaults = ARRAY_SIZE(cs42l56_reg_defaults),
 	.readable_reg = cs42l56_readable_register,
 	.volatile_reg = cs42l56_volatile_register,
-	.cache_type = REGCACHE_MAPLE,
+	.cache_type = REGCACHE_RBTREE,
 };
 
 static int cs42l56_handle_of_data(struct i2c_client *i2c_client,
@@ -1191,12 +1192,18 @@ static int cs42l56_i2c_probe(struct i2c_client *i2c_client)
 	if (pdata) {
 		cs42l56->pdata = *pdata;
 	} else {
+		pdata = devm_kzalloc(&i2c_client->dev, sizeof(*pdata),
+				     GFP_KERNEL);
+		if (!pdata)
+			return -ENOMEM;
+
 		if (i2c_client->dev.of_node) {
 			ret = cs42l56_handle_of_data(i2c_client,
 						     &cs42l56->pdata);
 			if (ret != 0)
 				return ret;
 		}
+		cs42l56->pdata = *pdata;
 	}
 
 	if (cs42l56->pdata.gpio_nreset) {
@@ -1314,12 +1321,13 @@ err_enable:
 	return ret;
 }
 
-static void cs42l56_i2c_remove(struct i2c_client *client)
+static int cs42l56_i2c_remove(struct i2c_client *client)
 {
 	struct cs42l56_private *cs42l56 = i2c_get_clientdata(client);
 
 	regulator_bulk_disable(ARRAY_SIZE(cs42l56->supplies),
 			       cs42l56->supplies);
+	return 0;
 }
 
 static const struct of_device_id cs42l56_of_match[] = {
@@ -1330,7 +1338,7 @@ MODULE_DEVICE_TABLE(of, cs42l56_of_match);
 
 
 static const struct i2c_device_id cs42l56_id[] = {
-	{ "cs42l56" },
+	{ "cs42l56", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, cs42l56_id);
@@ -1341,7 +1349,7 @@ static struct i2c_driver cs42l56_i2c_driver = {
 		.of_match_table = cs42l56_of_match,
 	},
 	.id_table = cs42l56_id,
-	.probe =    cs42l56_i2c_probe,
+	.probe_new = cs42l56_i2c_probe,
 	.remove =   cs42l56_i2c_remove,
 };
 

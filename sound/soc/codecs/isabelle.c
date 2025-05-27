@@ -1095,6 +1095,7 @@ static const struct snd_soc_component_driver soc_component_dev_isabelle = {
 	.num_dapm_routes	= ARRAY_SIZE(isabelle_intercon),
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
+	.non_legacy_dai_naming	= 1,
 };
 
 static const struct regmap_config isabelle_regmap_config = {
@@ -1133,7 +1134,7 @@ static int isabelle_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id isabelle_i2c_id[] = {
-	{ "isabelle" },
+	{ "isabelle", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, isabelle_i2c_id);
@@ -1142,7 +1143,7 @@ static struct i2c_driver isabelle_i2c_driver = {
 	.driver = {
 		.name = "isabelle",
 	},
-	.probe = isabelle_i2c_probe,
+	.probe_new = isabelle_i2c_probe,
 	.id_table = isabelle_i2c_id,
 };
 

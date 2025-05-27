@@ -37,8 +37,8 @@ static struct page *has_unmovable_pages(unsigned long start_pfn, unsigned long e
 	struct zone *zone = page_zone(page);
 	unsigned long pfn;
 
-	VM_BUG_ON(pageblock_start_pfn(start_pfn) !=
-		  pageblock_start_pfn(end_pfn - 1));
+	VM_BUG_ON(ALIGN_DOWN(start_pfn, pageblock_nr_pages) !=
+		  ALIGN_DOWN(end_pfn - 1, pageblock_nr_pages));
 
 	if (is_migrate_cma_page(page)) {
 		/*
@@ -79,24 +79,17 @@ static struct page *has_unmovable_pages(unsigned long start_pfn, unsigned long e
 		 * handle each tail page individually in migration.
 		 */
 		if (PageHuge(page) || PageTransCompound(page)) {
-			struct folio *folio = page_folio(page);
+			struct page *head = compound_head(page);
 			unsigned int skip_pages;
 
 			if (PageHuge(page)) {
-				struct hstate *h;
-
-				/*
-				 * The huge page may be freed so can not
-				 * use folio_hstate() directly.
-				 */
-				h = size_to_hstate(folio_size(folio));
-				if (h && !hugepage_migration_supported(h))
+				if (!hugepage_migration_supported(page_hstate(head)))
 					return page;
-			} else if (!folio_test_lru(folio) && !__folio_test_movable(folio)) {
+			} else if (!PageLRU(head) && !__PageMovable(head)) {
 				return page;
 			}
 
-			skip_pages = folio_nr_pages(folio) - folio_page_idx(folio, page);
+			skip_pages = compound_nr(head) - (page - head);
 			pfn += skip_pages - 1;
 			continue;
 		}
@@ -159,9 +152,6 @@ static int set_migratetype_isolate(struct page *page, int migratetype, int isol_
 	unsigned long flags;
 	unsigned long check_unmovable_start, check_unmovable_end;
 
-	if (PageUnaccepted(page))
-		accept_page(page);
-
 	spin_lock_irqsave(&zone->lock, flags);
 
 	/*
@@ -182,17 +172,21 @@ static int set_migratetype_isolate(struct page *page, int migratetype, int isol_
 	 * to avoid redundant checks.
 	 */
 	check_unmovable_start = max(page_to_pfn(page), start_pfn);
-	check_unmovable_end = min(pageblock_end_pfn(page_to_pfn(page)),
+	check_unmovable_end = min(ALIGN(page_to_pfn(page) + 1, pageblock_nr_pages),
 				  end_pfn);
 
 	unmovable = has_unmovable_pages(check_unmovable_start, check_unmovable_end,
 			migratetype, isol_flags);
 	if (!unmovable) {
-		if (!move_freepages_block_isolate(zone, page, MIGRATE_ISOLATE)) {
-			spin_unlock_irqrestore(&zone->lock, flags);
-			return -EBUSY;
-		}
+		unsigned long nr_pages;
+		int mt = get_pageblock_migratetype(page);
+
+		set_pageblock_migratetype(page, MIGRATE_ISOLATE);
 		zone->nr_isolate_pageblock++;
+		nr_pages = move_freepages_block(zone, page, MIGRATE_ISOLATE,
+									NULL);
+
+		__mod_zone_freepage_state(zone, -nr_pages, mt);
 		spin_unlock_irqrestore(&zone->lock, flags);
 		return 0;
 	}
@@ -212,7 +206,7 @@ static int set_migratetype_isolate(struct page *page, int migratetype, int isol_
 static void unset_migratetype_isolate(struct page *page, int migratetype)
 {
 	struct zone *zone;
-	unsigned long flags;
+	unsigned long flags, nr_pages;
 	bool isolated_page = false;
 	unsigned int order;
 	struct page *buddy;
@@ -232,7 +226,7 @@ static void unset_migratetype_isolate(struct page *page, int migratetype)
 	 */
 	if (PageBuddy(page)) {
 		order = buddy_order(page);
-		if (order >= pageblock_order && order < MAX_PAGE_ORDER) {
+		if (order >= pageblock_order && order < MAX_ORDER - 1) {
 			buddy = find_buddy_page_pfn(page, page_to_pfn(page),
 						    order, NULL);
 			if (buddy && !is_migrate_isolate_page(buddy)) {
@@ -258,15 +252,12 @@ static void unset_migratetype_isolate(struct page *page, int migratetype)
 	 * allocation.
 	 */
 	if (!isolated_page) {
-		/*
-		 * Isolating this block already succeeded, so this
-		 * should not fail on zone boundaries.
-		 */
-		WARN_ON_ONCE(!move_freepages_block_isolate(zone, page, migratetype));
-	} else {
-		set_pageblock_migratetype(page, migratetype);
-		__putback_isolated_page(page, order, migratetype);
+		nr_pages = move_freepages_block(zone, page, migratetype, NULL);
+		__mod_zone_freepage_state(zone, nr_pages, migratetype);
 	}
+	set_pageblock_migratetype(page, migratetype);
+	if (isolated_page)
+		__putback_isolated_page(page, order, migratetype);
 	zone->nr_isolate_pageblock--;
 out:
 	spin_unlock_irqrestore(&zone->lock, flags);
@@ -293,17 +284,16 @@ __first_valid_page(unsigned long pfn, unsigned long nr_pages)
  * within a free or in-use page.
  * @boundary_pfn:		pageblock-aligned pfn that a page might cross
  * @flags:			isolation flags
+ * @gfp_flags:			GFP flags used for migrating pages
  * @isolate_before:	isolate the pageblock before the boundary_pfn
  * @skip_isolation:	the flag to skip the pageblock isolation in second
  *			isolate_single_pageblock()
- * @migratetype:	migrate type to set in error recovery.
  *
- * Free and in-use pages can be as big as MAX_PAGE_ORDER and contain more than one
+ * Free and in-use pages can be as big as MAX_ORDER-1 and contain more than one
  * pageblock. When not all pageblocks within a page are isolated at the same
  * time, free page accounting can go wrong. For example, in the case of
- * MAX_PAGE_ORDER = pageblock_order + 1, a MAX_PAGE_ORDER page has two
- * pagelbocks.
- * [      MAX_PAGE_ORDER         ]
+ * MAX_ORDER-1 = pageblock_order + 1, a MAX_ORDER-1 page has two pagelbocks.
+ * [         MAX_ORDER-1         ]
  * [  pageblock0  |  pageblock1  ]
  * When either pageblock is isolated, if it is a free page, the page is not
  * split into separate migratetype lists, which is supposed to; if it is an
@@ -312,15 +302,16 @@ __first_valid_page(unsigned long pfn, unsigned long nr_pages)
  * the in-use page then splitting the free page.
  */
 static int isolate_single_pageblock(unsigned long boundary_pfn, int flags,
-		bool isolate_before, bool skip_isolation, int migratetype)
+			gfp_t gfp_flags, bool isolate_before, bool skip_isolation)
 {
+	unsigned char saved_mt;
 	unsigned long start_pfn;
 	unsigned long isolate_pageblock;
 	unsigned long pfn;
 	struct zone *zone;
 	int ret;
 
-	VM_BUG_ON(!pageblock_aligned(boundary_pfn));
+	VM_BUG_ON(!IS_ALIGNED(boundary_pfn, pageblock_nr_pages));
 
 	if (isolate_before)
 		isolate_pageblock = boundary_pfn - pageblock_nr_pages;
@@ -337,13 +328,13 @@ static int isolate_single_pageblock(unsigned long boundary_pfn, int flags,
 	start_pfn  = max(ALIGN_DOWN(isolate_pageblock, MAX_ORDER_NR_PAGES),
 				      zone->zone_start_pfn);
 
-	if (skip_isolation) {
-		int mt __maybe_unused = get_pageblock_migratetype(pfn_to_page(isolate_pageblock));
+	saved_mt = get_pageblock_migratetype(pfn_to_page(isolate_pageblock));
 
-		VM_BUG_ON(!is_migrate_isolate(mt));
-	} else {
-		ret = set_migratetype_isolate(pfn_to_page(isolate_pageblock), migratetype,
-				flags, isolate_pageblock, isolate_pageblock + pageblock_nr_pages);
+	if (skip_isolation)
+		VM_BUG_ON(!is_migrate_isolate(saved_mt));
+	else {
+		ret = set_migratetype_isolate(pfn_to_page(isolate_pageblock), saved_mt, flags,
+				isolate_pageblock, isolate_pageblock + pageblock_nr_pages);
 
 		if (ret)
 			return ret;
@@ -374,57 +365,108 @@ static int isolate_single_pageblock(unsigned long boundary_pfn, int flags,
 
 		VM_BUG_ON(!page);
 		pfn = page_to_pfn(page);
-
-		if (PageUnaccepted(page)) {
-			pfn += MAX_ORDER_NR_PAGES;
-			continue;
-		}
-
+		/*
+		 * start_pfn is MAX_ORDER_NR_PAGES aligned, if there is any
+		 * free pages in [start_pfn, boundary_pfn), its head page will
+		 * always be in the range.
+		 */
 		if (PageBuddy(page)) {
 			int order = buddy_order(page);
 
-			/* move_freepages_block_isolate() handled this */
-			VM_WARN_ON_ONCE(pfn + (1 << order) > boundary_pfn);
+			if (pfn + (1UL << order) > boundary_pfn) {
+				/* free page changed before split, check it again */
+				if (split_free_page(page, order, boundary_pfn - pfn))
+					continue;
+			}
 
 			pfn += 1UL << order;
 			continue;
 		}
-
 		/*
-		 * If a compound page is straddling our block, attempt
-		 * to migrate it out of the way.
-		 *
-		 * We don't have to worry about this creating a large
-		 * free page that straddles into our block: gigantic
-		 * pages are freed as order-0 chunks, and LRU pages
-		 * (currently) do not exceed pageblock_order.
-		 *
-		 * The block of interest has already been marked
-		 * MIGRATE_ISOLATE above, so when migration is done it
-		 * will free its pages onto the correct freelists.
+		 * migrate compound pages then let the free page handling code
+		 * above do the rest. If migration is not possible, just fail.
 		 */
 		if (PageCompound(page)) {
 			struct page *head = compound_head(page);
 			unsigned long head_pfn = page_to_pfn(head);
 			unsigned long nr_pages = compound_nr(head);
 
-			if (head_pfn + nr_pages <= boundary_pfn ||
-			    PageHuge(page)) {
+			if (head_pfn + nr_pages <= boundary_pfn) {
 				pfn = head_pfn + nr_pages;
 				continue;
 			}
-
+#if defined CONFIG_COMPACTION || defined CONFIG_CMA
 			/*
-			 * These pages are movable too, but they're
-			 * not expected to exceed pageblock_order.
-			 *
-			 * Let us know when they do, so we can add
-			 * proper free and split handling for them.
+			 * hugetlb, lru compound (THP), and movable compound pages
+			 * can be migrated. Otherwise, fail the isolation.
 			 */
-			VM_WARN_ON_ONCE_PAGE(PageLRU(page), page);
-			VM_WARN_ON_ONCE_PAGE(__PageMovable(page), page);
+			if (PageHuge(page) || PageLRU(page) || __PageMovable(page)) {
+				int order;
+				unsigned long outer_pfn;
+				int page_mt = get_pageblock_migratetype(page);
+				bool isolate_page = !is_migrate_isolate_page(page);
+				struct compact_control cc = {
+					.nr_migratepages = 0,
+					.order = -1,
+					.zone = page_zone(pfn_to_page(head_pfn)),
+					.mode = MIGRATE_SYNC,
+					.ignore_skip_hint = true,
+					.no_set_skip_hint = true,
+					.gfp_mask = gfp_flags,
+					.alloc_contig = true,
+				};
+				INIT_LIST_HEAD(&cc.migratepages);
 
-			goto failed;
+				/*
+				 * XXX: mark the page as MIGRATE_ISOLATE so that
+				 * no one else can grab the freed page after migration.
+				 * Ideally, the page should be freed as two separate
+				 * pages to be added into separate migratetype free
+				 * lists.
+				 */
+				if (isolate_page) {
+					ret = set_migratetype_isolate(page, page_mt,
+						flags, head_pfn, head_pfn + nr_pages);
+					if (ret)
+						goto failed;
+				}
+
+				ret = __alloc_contig_migrate_range(&cc, head_pfn,
+							head_pfn + nr_pages);
+
+				/*
+				 * restore the page's migratetype so that it can
+				 * be split into separate migratetype free lists
+				 * later.
+				 */
+				if (isolate_page)
+					unset_migratetype_isolate(page, page_mt);
+
+				if (ret)
+					goto failed;
+				/*
+				 * reset pfn to the head of the free page, so
+				 * that the free page handling code above can split
+				 * the free page to the right migratetype list.
+				 *
+				 * head_pfn is not used here as a hugetlb page order
+				 * can be bigger than MAX_ORDER-1, but after it is
+				 * freed, the free page order is not. Use pfn within
+				 * the range to find the head of the free page.
+				 */
+				order = 0;
+				outer_pfn = pfn;
+				while (!PageBuddy(pfn_to_page(outer_pfn))) {
+					/* stop if we cannot find the free page */
+					if (++order >= MAX_ORDER)
+						goto failed;
+					outer_pfn &= ~0UL << order;
+				}
+				pfn = outer_pfn;
+				continue;
+			} else
+#endif
+				goto failed;
 		}
 
 		pfn++;
@@ -433,14 +475,15 @@ static int isolate_single_pageblock(unsigned long boundary_pfn, int flags,
 failed:
 	/* restore the original migratetype */
 	if (!skip_isolation)
-		unset_migratetype_isolate(pfn_to_page(isolate_pageblock), migratetype);
+		unset_migratetype_isolate(pfn_to_page(isolate_pageblock), saved_mt);
 	return -EBUSY;
 }
 
 /**
- * start_isolate_page_range() - mark page range MIGRATE_ISOLATE
- * @start_pfn:		The first PFN of the range to be isolated.
- * @end_pfn:		The last PFN of the range to be isolated.
+ * start_isolate_page_range() - make page-allocation-type of range of pages to
+ * be MIGRATE_ISOLATE.
+ * @start_pfn:		The lower PFN of the range to be isolated.
+ * @end_pfn:		The upper PFN of the range to be isolated.
  * @migratetype:	Migrate type to set in error recovery.
  * @flags:		The following flags are allowed (they can be combined in
  *			a bit mask)
@@ -449,6 +492,8 @@ failed:
  *					 and PageOffline() pages.
  *			REPORT_FAILURE - report details about the failure to
  *			isolate the range
+ * @gfp_flags:		GFP flags used for migrating pages that sit across the
+ *			range boundaries.
  *
  * Making page-allocation-type to be MIGRATE_ISOLATE means free pages in
  * the range will never be allocated. Any free pages and pages freed in the
@@ -481,19 +526,18 @@ failed:
  * Return: 0 on success and -EBUSY if any part of range cannot be isolated.
  */
 int start_isolate_page_range(unsigned long start_pfn, unsigned long end_pfn,
-			     int migratetype, int flags)
+			     int migratetype, int flags, gfp_t gfp_flags)
 {
 	unsigned long pfn;
 	struct page *page;
 	/* isolation is done at page block granularity */
-	unsigned long isolate_start = pageblock_start_pfn(start_pfn);
-	unsigned long isolate_end = pageblock_align(end_pfn);
+	unsigned long isolate_start = ALIGN_DOWN(start_pfn, pageblock_nr_pages);
+	unsigned long isolate_end = ALIGN(end_pfn, pageblock_nr_pages);
 	int ret;
 	bool skip_isolation = false;
 
 	/* isolate [isolate_start, isolate_start + pageblock_nr_pages) pageblock */
-	ret = isolate_single_pageblock(isolate_start, flags, false,
-			skip_isolation, migratetype);
+	ret = isolate_single_pageblock(isolate_start, flags, gfp_flags, false, skip_isolation);
 	if (ret)
 		return ret;
 
@@ -501,8 +545,7 @@ int start_isolate_page_range(unsigned long start_pfn, unsigned long end_pfn,
 		skip_isolation = true;
 
 	/* isolate [isolate_end - pageblock_nr_pages, isolate_end) pageblock */
-	ret = isolate_single_pageblock(isolate_end, flags, true,
-			skip_isolation, migratetype);
+	ret = isolate_single_pageblock(isolate_end, flags, gfp_flags, true, skip_isolation);
 	if (ret) {
 		unset_migratetype_isolate(pfn_to_page(isolate_start), migratetype);
 		return ret;
@@ -525,22 +568,17 @@ int start_isolate_page_range(unsigned long start_pfn, unsigned long end_pfn,
 	return 0;
 }
 
-/**
- * undo_isolate_page_range - undo effects of start_isolate_page_range()
- * @start_pfn:		The first PFN of the isolated range
- * @end_pfn:		The last PFN of the isolated range
- * @migratetype:	New migrate type to set on the range
- *
- * This finds every MIGRATE_ISOLATE page block in the given range
- * and switches it to @migratetype.
+/*
+ * Make isolated pages available again.
  */
 void undo_isolate_page_range(unsigned long start_pfn, unsigned long end_pfn,
 			    int migratetype)
 {
 	unsigned long pfn;
 	struct page *page;
-	unsigned long isolate_start = pageblock_start_pfn(start_pfn);
-	unsigned long isolate_end = pageblock_align(end_pfn);
+	unsigned long isolate_start = ALIGN_DOWN(start_pfn, pageblock_nr_pages);
+	unsigned long isolate_end = ALIGN(end_pfn, pageblock_nr_pages);
+
 
 	for (pfn = isolate_start;
 	     pfn < isolate_end;
@@ -591,21 +629,7 @@ __test_page_isolated_in_pageblock(unsigned long pfn, unsigned long end_pfn,
 	return pfn;
 }
 
-/**
- * test_pages_isolated - check if pageblocks in range are isolated
- * @start_pfn:		The first PFN of the isolated range
- * @end_pfn:		The first PFN *after* the isolated range
- * @isol_flags:		Testing mode flags
- *
- * This tests if all in the specified range are free.
- *
- * If %MEMORY_OFFLINE is specified in @flags, it will consider
- * poisoned and offlined pages free as well.
- *
- * Caller must ensure the requested range doesn't span zones.
- *
- * Returns 0 if true, -EBUSY if one or more pages are in use.
- */
+/* Caller should ensure that requested range is in a single zone */
 int test_pages_isolated(unsigned long start_pfn, unsigned long end_pfn,
 			int isol_flags)
 {
@@ -615,18 +639,8 @@ int test_pages_isolated(unsigned long start_pfn, unsigned long end_pfn,
 	int ret;
 
 	/*
-	 * Due to the deferred freeing of hugetlb folios, the hugepage folios may
-	 * not immediately release to the buddy system. This can cause PageBuddy()
-	 * to fail in __test_page_isolated_in_pageblock(). To ensure that the
-	 * hugetlb folios are properly released back to the buddy system, we
-	 * invoke the wait_for_freed_hugetlb_folios() function to wait for the
-	 * release to complete.
-	 */
-	wait_for_freed_hugetlb_folios();
-
-	/*
-	 * Note: pageblock_nr_pages != MAX_PAGE_ORDER. Then, chunks of free
-	 * pages are not aligned to pageblock_nr_pages.
+	 * Note: pageblock_nr_pages != MAX_ORDER. Then, chunks of free pages
+	 * are not aligned to pageblock_nr_pages.
 	 * Then we just check migratetype first.
 	 */
 	for (pfn = start_pfn; pfn < end_pfn; pfn += pageblock_nr_pages) {

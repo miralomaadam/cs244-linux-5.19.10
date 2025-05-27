@@ -672,7 +672,8 @@ static const struct dvb_frontend_ops si2168_ops = {
 	.read_status = si2168_read_status,
 };
 
-static int si2168_probe(struct i2c_client *client)
+static int si2168_probe(struct i2c_client *client,
+		const struct i2c_device_id *id)
 {
 	struct si2168_config *config = client->dev.platform_data;
 	struct si2168_dev *dev;
@@ -744,7 +745,7 @@ static int si2168_probe(struct i2c_client *client)
 		goto err_kfree;
 	}
 	dev->muxc->priv = client;
-	ret = i2c_mux_add_adapter(dev->muxc, 0, 0);
+	ret = i2c_mux_add_adapter(dev->muxc, 0, 0, 0);
 	if (ret)
 		goto err_kfree;
 
@@ -773,7 +774,7 @@ err:
 	return ret;
 }
 
-static void si2168_remove(struct i2c_client *client)
+static int si2168_remove(struct i2c_client *client)
 {
 	struct si2168_dev *dev = i2c_get_clientdata(client);
 
@@ -785,10 +786,12 @@ static void si2168_remove(struct i2c_client *client)
 	dev->fe.demodulator_priv = NULL;
 
 	kfree(dev);
+
+	return 0;
 }
 
 static const struct i2c_device_id si2168_id_table[] = {
-	{ "si2168" },
+	{"si2168", 0},
 	{}
 };
 MODULE_DEVICE_TABLE(i2c, si2168_id_table);

@@ -495,7 +495,8 @@ static int hym8563_resume(struct device *dev)
 
 static SIMPLE_DEV_PM_OPS(hym8563_pm_ops, hym8563_suspend, hym8563_resume);
 
-static int hym8563_probe(struct i2c_client *client)
+static int hym8563_probe(struct i2c_client *client,
+			 const struct i2c_device_id *id)
 {
 	struct hym8563 *hym8563;
 	int ret;
@@ -518,14 +519,9 @@ static int hym8563_probe(struct i2c_client *client)
 	}
 
 	if (client->irq > 0) {
-		unsigned long irqflags = IRQF_TRIGGER_LOW;
-
-		if (dev_fwnode(&client->dev))
-			irqflags = 0;
-
 		ret = devm_request_threaded_irq(&client->dev, client->irq,
 						NULL, hym8563_irq,
-						irqflags | IRQF_ONESHOT,
+						IRQF_TRIGGER_LOW | IRQF_ONESHOT,
 						client->name, hym8563);
 		if (ret < 0) {
 			dev_err(&client->dev, "irq %d request failed, %d\n",
@@ -559,8 +555,8 @@ static int hym8563_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id hym8563_id[] = {
-	{ "hym8563" },
-	{}
+	{ "hym8563", 0 },
+	{},
 };
 MODULE_DEVICE_TABLE(i2c, hym8563_id);
 

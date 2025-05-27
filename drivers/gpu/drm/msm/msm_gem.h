@@ -9,7 +9,6 @@
 
 #include <linux/kref.h>
 #include <linux/dma-resv.h>
-#include "drm/drm_exec.h"
 #include "drm/gpu_scheduler.h"
 #include "msm_drv.h"
 
@@ -64,14 +63,25 @@ struct msm_gem_vma {
 	struct msm_gem_address_space *aspace;
 	struct list_head list;    /* node in msm_gem_object::vmas */
 	bool mapped;
+	int inuse;
+	uint32_t fence_mask;
+	uint32_t fence[MSM_GPU_MAX_RINGS];
+	struct msm_fence_context *fctx[MSM_GPU_MAX_RINGS];
 };
 
-struct msm_gem_vma *msm_gem_vma_new(struct msm_gem_address_space *aspace);
-int msm_gem_vma_init(struct msm_gem_vma *vma, int size,
+int msm_gem_init_vma(struct msm_gem_address_space *aspace,
+		struct msm_gem_vma *vma, int size,
 		u64 range_start, u64 range_end);
-void msm_gem_vma_purge(struct msm_gem_vma *vma);
-int msm_gem_vma_map(struct msm_gem_vma *vma, int prot, struct sg_table *sgt, int size);
-void msm_gem_vma_close(struct msm_gem_vma *vma);
+bool msm_gem_vma_inuse(struct msm_gem_vma *vma);
+void msm_gem_purge_vma(struct msm_gem_address_space *aspace,
+		struct msm_gem_vma *vma);
+void msm_gem_unpin_vma(struct msm_gem_vma *vma);
+void msm_gem_unpin_vma_fenced(struct msm_gem_vma *vma, struct msm_fence_context *fctx);
+int msm_gem_map_vma(struct msm_gem_address_space *aspace,
+		struct msm_gem_vma *vma, int prot,
+		struct sg_table *sgt, int size);
+void msm_gem_close_vma(struct msm_gem_address_space *aspace,
+		struct msm_gem_vma *vma);
 
 struct msm_gem_object {
 	struct drm_gem_object base;
@@ -79,11 +89,19 @@ struct msm_gem_object {
 	uint32_t flags;
 
 	/**
-	 * madv: are the backing pages purgeable?
-	 *
-	 * Protected by obj lock and LRU lock
+	 * Advice: are the backing pages purgeable?
 	 */
 	uint8_t madv;
+
+	/**
+	 * Is object on inactive_dontneed list (ie. counted in priv->shrinkable_count)?
+	 */
+	bool dontneed : 1;
+
+	/**
+	 * Is object evictable (ie. counted in priv->evictable_count)?
+	 */
+	bool evictable : 1;
 
 	/**
 	 * count of active vmap'ing
@@ -95,6 +113,17 @@ struct msm_gem_object {
 	 * priv->obj_lock
 	 */
 	struct list_head node;
+
+	/**
+	 * An object is either:
+	 *  inactive - on priv->inactive_dontneed or priv->inactive_willneed
+	 *     (depending on purgeability status)
+	 *  active   - on one one of the gpu's active_list..  well, at
+	 *     least for now we don't have (I don't think) hw sync between
+	 *     2d and 3d one devices which have both, meaning we need to
+	 *     block on submit if a bo is already on other ring
+	 */
+	struct list_head mm_list;
 
 	struct page **pages;
 	struct sg_table *sgt;
@@ -109,15 +138,7 @@ struct msm_gem_object {
 
 	char name[32]; /* Identifier to print for the debugfs files */
 
-	/* userspace metadata backchannel */
-	void *metadata;
-	u32 metadata_size;
-
-	/**
-	 * pin_count: Number of times the pages are pinned
-	 *
-	 * Protected by LRU lock.
-	 */
+	int active_count;
 	int pin_count;
 };
 #define to_msm_bo(x) container_of(x, struct msm_gem_object, base)
@@ -125,7 +146,6 @@ struct msm_gem_object {
 uint64_t msm_gem_mmap_offset(struct drm_gem_object *obj);
 int msm_gem_pin_vma_locked(struct drm_gem_object *obj, struct msm_gem_vma *vma);
 void msm_gem_unpin_locked(struct drm_gem_object *obj);
-void msm_gem_unpin_active(struct drm_gem_object *obj);
 struct msm_gem_vma *msm_gem_get_vma_locked(struct drm_gem_object *obj,
 					   struct msm_gem_address_space *aspace);
 int msm_gem_get_iova(struct drm_gem_object *obj,
@@ -139,9 +159,8 @@ int msm_gem_get_and_pin_iova(struct drm_gem_object *obj,
 		struct msm_gem_address_space *aspace, uint64_t *iova);
 void msm_gem_unpin_iova(struct drm_gem_object *obj,
 		struct msm_gem_address_space *aspace);
-void msm_gem_pin_obj_locked(struct drm_gem_object *obj);
-struct page **msm_gem_pin_pages_locked(struct drm_gem_object *obj);
-void msm_gem_unpin_pages_locked(struct drm_gem_object *obj);
+struct page **msm_gem_get_pages(struct drm_gem_object *obj);
+void msm_gem_put_pages(struct drm_gem_object *obj);
 int msm_gem_dumb_create(struct drm_file *file, struct drm_device *dev,
 		struct drm_mode_create_dumb *args);
 int msm_gem_dumb_map_offset(struct drm_file *file, struct drm_device *dev,
@@ -152,9 +171,11 @@ void *msm_gem_get_vaddr_active(struct drm_gem_object *obj);
 void msm_gem_put_vaddr_locked(struct drm_gem_object *obj);
 void msm_gem_put_vaddr(struct drm_gem_object *obj);
 int msm_gem_madvise(struct drm_gem_object *obj, unsigned madv);
-bool msm_gem_active(struct drm_gem_object *obj);
+void msm_gem_active_get(struct drm_gem_object *obj, struct msm_gpu *gpu);
+void msm_gem_active_put(struct drm_gem_object *obj);
 int msm_gem_cpu_prep(struct drm_gem_object *obj, uint32_t op, ktime_t *timeout);
 int msm_gem_cpu_fini(struct drm_gem_object *obj);
+void msm_gem_free_object(struct drm_gem_object *obj);
 int msm_gem_new_handle(struct drm_device *dev, struct drm_file *file,
 		uint32_t size, uint32_t flags, uint32_t *handle, char *name);
 struct drm_gem_object *msm_gem_new(struct drm_device *dev,
@@ -188,6 +209,12 @@ msm_gem_lock(struct drm_gem_object *obj)
 	dma_resv_lock(obj->resv, NULL);
 }
 
+static inline bool __must_check
+msm_gem_trylock(struct drm_gem_object *obj)
+{
+	return dma_resv_trylock(obj->resv);
+}
+
 static inline int
 msm_gem_lock_interruptible(struct drm_gem_object *obj)
 {
@@ -200,25 +227,16 @@ msm_gem_unlock(struct drm_gem_object *obj)
 	dma_resv_unlock(obj->resv);
 }
 
-static inline void
-msm_gem_assert_locked(struct drm_gem_object *obj)
+static inline bool
+msm_gem_is_locked(struct drm_gem_object *obj)
 {
-	/*
-	 * Destroying the object is a special case.. msm_gem_free_object()
-	 * calls many things that WARN_ON if the obj lock is not held.  But
-	 * acquiring the obj lock in msm_gem_free_object() can cause a
-	 * locking order inversion between reservation_ww_class_mutex and
-	 * fs_reclaim.
-	 *
-	 * This deadlock is not actually possible, because no one should
-	 * be already holding the lock when msm_gem_free_object() is called.
-	 * Unfortunately lockdep is not aware of this detail.  So when the
-	 * refcount drops to zero, we pretend it is already locked.
-	 */
-	lockdep_assert_once(
-		(kref_read(&obj->refcount) == 0) ||
-		(lockdep_is_held(&obj->resv->lock.base) != LOCK_STATE_NOT_HELD)
-	);
+	return dma_resv_is_locked(obj->resv);
+}
+
+static inline bool is_active(struct msm_gem_object *msm_obj)
+{
+	GEM_WARN_ON(!msm_gem_is_locked(&msm_obj->base));
+	return msm_obj->active_count;
 }
 
 /* imported/exported objects are not purgeable: */
@@ -235,13 +253,79 @@ static inline bool is_purgeable(struct msm_gem_object *msm_obj)
 
 static inline bool is_vunmapable(struct msm_gem_object *msm_obj)
 {
-	msm_gem_assert_locked(&msm_obj->base);
+	GEM_WARN_ON(!msm_gem_is_locked(&msm_obj->base));
 	return (msm_obj->vmap_count == 0) && msm_obj->vaddr;
+}
+
+static inline void mark_purgeable(struct msm_gem_object *msm_obj)
+{
+	struct msm_drm_private *priv = msm_obj->base.dev->dev_private;
+
+	GEM_WARN_ON(!mutex_is_locked(&priv->mm_lock));
+
+	if (is_unpurgeable(msm_obj))
+		return;
+
+	if (GEM_WARN_ON(msm_obj->dontneed))
+		return;
+
+	priv->shrinkable_count += msm_obj->base.size >> PAGE_SHIFT;
+	msm_obj->dontneed = true;
+}
+
+static inline void mark_unpurgeable(struct msm_gem_object *msm_obj)
+{
+	struct msm_drm_private *priv = msm_obj->base.dev->dev_private;
+
+	GEM_WARN_ON(!mutex_is_locked(&priv->mm_lock));
+
+	if (is_unpurgeable(msm_obj))
+		return;
+
+	if (GEM_WARN_ON(!msm_obj->dontneed))
+		return;
+
+	priv->shrinkable_count -= msm_obj->base.size >> PAGE_SHIFT;
+	GEM_WARN_ON(priv->shrinkable_count < 0);
+	msm_obj->dontneed = false;
 }
 
 static inline bool is_unevictable(struct msm_gem_object *msm_obj)
 {
 	return is_unpurgeable(msm_obj) || msm_obj->vaddr;
+}
+
+static inline void mark_evictable(struct msm_gem_object *msm_obj)
+{
+	struct msm_drm_private *priv = msm_obj->base.dev->dev_private;
+
+	WARN_ON(!mutex_is_locked(&priv->mm_lock));
+
+	if (is_unevictable(msm_obj))
+		return;
+
+	if (WARN_ON(msm_obj->evictable))
+		return;
+
+	priv->evictable_count += msm_obj->base.size >> PAGE_SHIFT;
+	msm_obj->evictable = true;
+}
+
+static inline void mark_unevictable(struct msm_gem_object *msm_obj)
+{
+	struct msm_drm_private *priv = msm_obj->base.dev->dev_private;
+
+	WARN_ON(!mutex_is_locked(&priv->mm_lock));
+
+	if (is_unevictable(msm_obj))
+		return;
+
+	if (WARN_ON(!msm_obj->evictable))
+		return;
+
+	priv->evictable_count -= msm_obj->base.size >> PAGE_SHIFT;
+	WARN_ON(priv->evictable_count < 0);
+	msm_obj->evictable = false;
 }
 
 void msm_gem_purge(struct drm_gem_object *obj);
@@ -259,7 +343,7 @@ struct msm_gem_submit {
 	struct msm_gpu *gpu;
 	struct msm_gem_address_space *aspace;
 	struct list_head node;   /* node in ring submit list */
-	struct drm_exec exec;
+	struct ww_acquire_ctx ticket;
 	uint32_t seqno;		/* Sequence number of the submit on the ring */
 
 	/* Hw fence, which is created when the scheduler executes the job, and
@@ -275,9 +359,9 @@ struct msm_gem_submit {
 	int fence_id;       /* key into queue->fence_idr */
 	struct msm_gpu_submitqueue *queue;
 	struct pid *pid;    /* submitting process */
-	bool bos_pinned : 1;
-	bool fault_dumped:1;/* Limit devcoredump dumping to one per submit */
-	bool in_rb : 1;     /* "sudo" mode, copy cmds into RB */
+	bool fault_dumped;  /* Limit devcoredump dumping to one per submit */
+	bool valid;         /* true if no cmdstream patching needed */
+	bool in_rb;         /* "sudo" mode, copy cmds into RB */
 	struct msm_ringbuffer *ring;
 	unsigned int nr_cmds;
 	unsigned int nr_bos;
@@ -292,12 +376,19 @@ struct msm_gem_submit {
 		struct drm_msm_gem_submit_reloc *relocs;
 	} *cmd;  /* array of size nr_cmds */
 	struct {
+/* make sure these don't conflict w/ MSM_SUBMIT_BO_x */
+#define BO_VALID	0x8000	/* is current addr in cmdstream correct/valid? */
+#define BO_LOCKED	0x4000	/* obj lock is held */
+#define BO_ACTIVE	0x2000	/* active refcnt is held */
+#define BO_OBJ_PINNED	0x1000	/* obj (pages) is pinned and on active list */
+#define BO_VMA_PINNED	0x0800	/* vma (virtual address) is pinned */
 		uint32_t flags;
 		union {
-			struct drm_gem_object *obj;
+			struct msm_gem_object *obj;
 			uint32_t handle;
 		};
 		uint64_t iova;
+		struct msm_gem_vma *vma;
 	} bos[];
 };
 

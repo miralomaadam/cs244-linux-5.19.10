@@ -6,31 +6,44 @@
  * expected.
  */
 
-#include <kselftest.h>
 #include <signal.h>
 #include <ucontext.h>
 #include <sys/prctl.h>
 
 #include "test_signals_utils.h"
-#include "sve_helpers.h"
 #include "testcases.h"
 
-static union {
-	ucontext_t uc;
-	char buf[1024 * 128];
-} context;
+struct fake_sigframe sf;
+static unsigned int vls[SVE_VQ_MAX];
+unsigned int nvls = 0;
 
 static bool sme_get_vls(struct tdescr *td)
 {
-	int res = sve_fill_vls(VLS_USE_SME, 1);
+	int vq, vl;
 
-	if (!res)
-		return true;
+	/*
+	 * Enumerate up to SVE_VQ_MAX vector lengths
+	 */
+	for (vq = SVE_VQ_MAX; vq > 0; --vq) {
+		vl = prctl(PR_SVE_SET_VL, vq * 16);
+		if (vl == -1)
+			return false;
 
-	if (res == KSFT_SKIP)
-		td->result = KSFT_SKIP;
+		vl &= PR_SME_VL_LEN_MASK;
 
-	return false;
+		/* Skip missing VLs */
+		vq = sve_vq_from_vl(vl);
+
+		vls[nvls++] = vl;
+	}
+
+	/* We need at least one VL */
+	if (nvls < 1) {
+		fprintf(stderr, "Only %d VL supported\n", nvls);
+		return false;
+	}
+
+	return true;
 }
 
 static void setup_za_regs(void)
@@ -39,13 +52,11 @@ static void setup_za_regs(void)
 	asm volatile(".inst 0xd503457f" : : : );
 }
 
-static char zeros[ZA_SIG_REGS_SIZE(SVE_VQ_MAX)];
-
 static int do_one_sme_vl(struct tdescr *td, siginfo_t *si, ucontext_t *uc,
 			 unsigned int vl)
 {
-	size_t offset;
-	struct _aarch64_ctx *head = GET_BUF_RESV_HEAD(context);
+	size_t resv_sz, offset;
+	struct _aarch64_ctx *head = GET_SF_RESV_HEAD(sf);
 	struct za_context *za;
 
 	fprintf(stderr, "Testing VL %d\n", vl);
@@ -60,10 +71,11 @@ static int do_one_sme_vl(struct tdescr *td, siginfo_t *si, ucontext_t *uc,
 	 * in it.
 	 */
 	setup_za_regs();
-	if (!get_current_context(td, &context.uc, sizeof(context)))
+	if (!get_current_context(td, &sf.uc))
 		return 1;
 
-	head = get_header(head, ZA_MAGIC, GET_BUF_RESV_SIZE(context), &offset);
+	resv_sz = GET_SF_RESV_SIZE(sf);
+	head = get_header(head, ZA_MAGIC, resv_sz, &offset);
 	if (!head) {
 		fprintf(stderr, "No ZA context\n");
 		return 1;
@@ -75,26 +87,9 @@ static int do_one_sme_vl(struct tdescr *td, siginfo_t *si, ucontext_t *uc,
 		return 1;
 	}
 
-	if (head->size != ZA_SIG_CONTEXT_SIZE(sve_vq_from_vl(vl))) {
-		fprintf(stderr, "ZA context size %u, expected %lu\n",
-			head->size, ZA_SIG_CONTEXT_SIZE(sve_vq_from_vl(vl)));
-		return 1;
-	}
-
+	/* The actual size validation is done in get_current_context() */
 	fprintf(stderr, "Got expected size %u and VL %d\n",
 		head->size, za->vl);
-
-	/* We didn't load any data into ZA so it should be all zeros */
-	if (memcmp(zeros, (char *)za + ZA_SIG_REGS_OFFSET,
-		   ZA_SIG_REGS_SIZE(sve_vq_from_vl(za->vl))) != 0) {
-		fprintf(stderr, "ZA data invalid\n");
-		return 1;
-	}
-
-	if (get_svcr() != 0) {
-		fprintf(stderr, "Unexpected SVCR %lx\n", get_svcr());
-		return 1;
-	}
 
 	return 0;
 }
@@ -104,6 +99,16 @@ static int sme_regs(struct tdescr *td, siginfo_t *si, ucontext_t *uc)
 	int i;
 
 	for (i = 0; i < nvls; i++) {
+		/*
+		 * TODO: the signal test helpers can't currently cope
+		 * with signal frames bigger than struct sigcontext,
+		 * skip VLs that will trigger that.
+		 */
+		if (vls[i] > 32) {
+			printf("Skipping VL %u due to stack size\n", vls[i]);
+			continue;
+		}
+
 		if (do_one_sme_vl(td, si, uc, vls[i]))
 			return 1;
 	}

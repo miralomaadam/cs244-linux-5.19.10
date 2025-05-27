@@ -30,14 +30,9 @@
 			#interrupt-cells = <2>;
 		};
 
-		pm8350c_flash: led-controller@ee00 {
-			compatible = "qcom,pm8350c-flash-led", "qcom,spmi-flash-led";
-			reg = <0xee00>;
-			status = "disabled";
-		};
-
-		pm8350c_pwm: pwm {
+		pm8350c_pwm: pwm@e800 {
 			compatible = "qcom,pm8350c-pwm";
+			reg = <0xe800>;
 			#pwm-cells = <2>;
 			status = "disabled";
 		};
@@ -48,7 +43,7 @@
 	thermal-zones {
 		pm8350c_thermal: pm8350c-thermal {
 			polling-delay-passive = <100>;
-
+			polling-delay = <0>;
 			thermal-sensors = <&pm8350c_temp_alarm>;
 
 			trips {

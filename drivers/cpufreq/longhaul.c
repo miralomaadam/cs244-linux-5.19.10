@@ -236,9 +236,8 @@ static void do_powersaver(int cx_address, unsigned int mults_index,
 }
 
 /**
- * longhaul_setstate()
- * @policy: cpufreq_policy structure containing the current policy.
- * @table_index: index of the frequency within the cpufreq_frequency_table.
+ * longhaul_set_cpu_frequency()
+ * @mults_index : bitpattern of the new multiplier.
  *
  * Sets a new clock ratio.
  */
@@ -408,10 +407,10 @@ static int guess_fsb(int mult)
 {
 	int speed = cpu_khz / 1000;
 	int i;
-	static const int speeds[] = { 666, 1000, 1333, 2000 };
+	int speeds[] = { 666, 1000, 1333, 2000 };
 	int f_max, f_min;
 
-	for (i = 0; i < ARRAY_SIZE(speeds); i++) {
+	for (i = 0; i < 4; i++) {
 		f_max = ((speeds[i] * mult) + 50) / 100;
 		f_max += (ROUNDING / 2);
 		f_min = f_max - ROUNDING;
@@ -906,6 +905,7 @@ static struct cpufreq_driver longhaul_driver = {
 	.get	= longhaul_get,
 	.init	= longhaul_cpu_init,
 	.name	= "longhaul",
+	.attr	= cpufreq_generic_attr,
 };
 
 static const struct x86_cpu_id longhaul_id[] = {

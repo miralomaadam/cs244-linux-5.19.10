@@ -25,6 +25,8 @@ properties:
   st95hfvin-supply:
     description: ST95HF transceiver's Vin regulator supply
 
+  spi-max-frequency: true
+
 required:
   - compatible
   - enable-gpio
@@ -32,10 +34,7 @@ required:
   - reg
   - spi-max-frequency
 
-allOf:
-  - $ref: /schemas/spi/spi-peripheral-props.yaml#
-
-unevaluatedProperties: false
+additionalProperties: false
 
 examples:
   - |

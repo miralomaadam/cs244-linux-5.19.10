@@ -14,9 +14,8 @@
 #include <linux/debugfs.h>
 
 #include <asm/asm-prototypes.h>
-#include <asm/text-patching.h>
+#include <asm/code-patching.h>
 #include <asm/security_features.h>
-#include <asm/sections.h>
 #include <asm/setup.h>
 #include <asm/inst.h>
 
@@ -35,7 +34,7 @@ static enum branch_cache_flush_type link_stack_flush_type = BRANCH_CACHE_FLUSH_N
 bool barrier_nospec_enabled;
 static bool no_nospec;
 static bool btb_flush_enabled;
-#if defined(CONFIG_PPC_E500) || defined(CONFIG_PPC_BOOK3S_64)
+#if defined(CONFIG_PPC_FSL_BOOK3E) || defined(CONFIG_PPC_BOOK3S_64)
 static bool no_spectrev2;
 #endif
 
@@ -122,7 +121,7 @@ static __init int security_feature_debugfs_init(void)
 device_initcall(security_feature_debugfs_init);
 #endif /* CONFIG_DEBUG_FS */
 
-#if defined(CONFIG_PPC_E500) || defined(CONFIG_PPC_BOOK3S_64)
+#if defined(CONFIG_PPC_FSL_BOOK3E) || defined(CONFIG_PPC_BOOK3S_64)
 static int __init handle_nospectre_v2(char *p)
 {
 	no_spectrev2 = true;
@@ -130,9 +129,9 @@ static int __init handle_nospectre_v2(char *p)
 	return 0;
 }
 early_param("nospectre_v2", handle_nospectre_v2);
-#endif /* CONFIG_PPC_E500 || CONFIG_PPC_BOOK3S_64 */
+#endif /* CONFIG_PPC_FSL_BOOK3E || CONFIG_PPC_BOOK3S_64 */
 
-#ifdef CONFIG_PPC_E500
+#ifdef CONFIG_PPC_FSL_BOOK3E
 void __init setup_spectre_v2(void)
 {
 	if (no_spectrev2 || cpu_mitigations_off())
@@ -140,7 +139,7 @@ void __init setup_spectre_v2(void)
 	else
 		btb_flush_enabled = true;
 }
-#endif /* CONFIG_PPC_E500 */
+#endif /* CONFIG_PPC_FSL_BOOK3E */
 
 #ifdef CONFIG_PPC_BOOK3S_64
 ssize_t cpu_show_meltdown(struct device *dev, struct device_attribute *attr, char *buf)
@@ -364,27 +363,26 @@ ssize_t cpu_show_spec_store_bypass(struct device *dev, struct device_attribute *
 
 static int ssb_prctl_get(struct task_struct *task)
 {
-	/*
-	 * The STF_BARRIER feature is on by default, so if it's off that means
-	 * firmware has explicitly said the CPU is not vulnerable via either
-	 * the hypercall or device tree.
-	 */
-	if (!security_ftr_enabled(SEC_FTR_STF_BARRIER))
-		return PR_SPEC_NOT_AFFECTED;
-
-	/*
-	 * If the system's CPU has no known barrier (see setup_stf_barrier())
-	 * then assume that the CPU is not vulnerable.
-	 */
 	if (stf_enabled_flush_types == STF_BARRIER_NONE)
+		/*
+		 * We don't have an explicit signal from firmware that we're
+		 * vulnerable or not, we only have certain CPU revisions that
+		 * are known to be vulnerable.
+		 *
+		 * We assume that if we're on another CPU, where the barrier is
+		 * NONE, then we are not vulnerable.
+		 */
 		return PR_SPEC_NOT_AFFECTED;
+	else
+		/*
+		 * If we do have a barrier type then we are vulnerable. The
+		 * barrier is not a global or per-process mitigation, so the
+		 * only value we can report here is PR_SPEC_ENABLE, which
+		 * appears as "vulnerable" in /proc.
+		 */
+		return PR_SPEC_ENABLE;
 
-	/*
-	 * Otherwise the CPU is vulnerable. The barrier is not a global or
-	 * per-process mitigation, so the only value that can be reported here
-	 * is PR_SPEC_ENABLE, which appears as "vulnerable" in /proc.
-	 */
-	return PR_SPEC_ENABLE;
+	return -EINVAL;
 }
 
 int arch_prctl_spec_ctrl_get(struct task_struct *task, unsigned long which)

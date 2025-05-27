@@ -291,7 +291,8 @@ function check_ffr
 #endif
 endfunction
 
-// Modify live register state, the signal return will undo our changes
+// Any SVE register modified here can cause corruption in the main
+// thread -- but *only* the registers modified here.
 function irritator_handler
 	// Increment the irritation signal count (x23):
 	ldr	x0, [x2, #ucontext_regs + 8 * 23]
@@ -299,24 +300,16 @@ function irritator_handler
 	str	x0, [x2, #ucontext_regs + 8 * 23]
 
 	// Corrupt some random Z-regs
+	adr	x0, .text + (irritator_handler - .text) / 16 * 16
 	movi	v0.8b, #1
 	movi	v9.16b, #2
 	movi	v31.8b, #3
-	// And P0
-	ptrue	p0.d
 #ifndef SSVE
+	// And P0
+	rdffr	p0.b
 	// And FFR
 	wrffr	p15.b
 #endif
-
-	ret
-endfunction
-
-function tickle_handler
-	// Increment the signal count (x23):
-	ldr	x0, [x2, #ucontext_regs + 8 * 23]
-	add	x0, x0, #1
-	str	x0, [x2, #ucontext_regs + 8 * 23]
 
 	ret
 endfunction
@@ -376,32 +369,7 @@ endfunction
 // Main program entry point
 .globl _start
 function _start
-	enable_gcs
-
-	mov	x23, #0		// Irritation signal count
-
-	mov	w0, #SIGINT
-	adr	x1, terminate_handler
-	mov	w2, #SA_SIGINFO
-	bl	setsignal
-
-	mov	w0, #SIGTERM
-	adr	x1, terminate_handler
-	mov	w2, #SA_SIGINFO
-	bl	setsignal
-
-	mov	w0, #SIGUSR1
-	adr	x1, irritator_handler
-	mov	w2, #SA_SIGINFO
-	orr	w2, w2, #SA_NODEFER
-	bl	setsignal
-
-	mov	w0, #SIGUSR2
-	adr	x1, tickle_handler
-	mov	w2, #SA_SIGINFO
-	orr	w2, w2, #SA_NODEFER
-	bl	setsignal
-
+_start:
 #ifdef SSVE
 	puts	"Streaming mode "
 	smstart_sm
@@ -436,6 +404,24 @@ function _start
 	puts	"PID:\t"
 	mov	x0, x20
 	bl	putdecn
+
+	mov	x23, #0		// Irritation signal count
+
+	mov	w0, #SIGINT
+	adr	x1, terminate_handler
+	mov	w2, #SA_SIGINFO
+	bl	setsignal
+
+	mov	w0, #SIGTERM
+	adr	x1, terminate_handler
+	mov	w2, #SA_SIGINFO
+	bl	setsignal
+
+	mov	w0, #SIGUSR1
+	adr	x1, irritator_handler
+	mov	w2, #SA_SIGINFO
+	orr	w2, w2, #SA_NODEFER
+	bl	setsignal
 
 #ifdef SSVE
 	smstart_sm		// syscalls will have exited streaming mode
@@ -473,13 +459,6 @@ function _start
 //	mov	x8, #__NR_sched_yield	// Encourage preemption
 //	svc	#0
 
-#ifdef SSVE
-	mrs	x0, S3_3_C4_C2_2	// SVCR should have ZA=0,SM=1
-	and	x1, x0, #3
-	cmp	x1, #1
-	b.ne	svcr_barf
-#endif
-
 	mov	x21, #0
 0:	mov	x0, x21
 	bl	check_zreg
@@ -515,10 +494,6 @@ function barf
 	mov	x11, x1	// actual data
 	mov	x12, x2	// data size
 
-#ifdef SSVE
-	mrs	x13, S3_3_C4_C2_2
-#endif
-
 	puts	"Mismatch: PID="
 	mov	x0, x20
 	bl	putdec
@@ -537,12 +512,6 @@ function barf
 	mov	x1, x12
 	bl	dumphex
 	puts	"]\n"
-
-#ifdef SSVE
-	puts	"\tSVCR: "
-	mov	x0, x13
-	bl	putdecn
-#endif
 
 	mov	x8, #__NR_getpid
 	svc	#0
@@ -563,18 +532,6 @@ function vl_barf
 	mov	x10, x0
 
 	puts	"Bad active VL: "
-	mov	x0, x10
-	bl	putdecn
-
-	mov	x8, #__NR_exit
-	mov	x1, #1
-	svc	#0
-endfunction
-
-function svcr_barf
-	mov	x10, x0
-
-	puts	"Bad SVCR: "
 	mov	x0, x10
 	bl	putdecn
 

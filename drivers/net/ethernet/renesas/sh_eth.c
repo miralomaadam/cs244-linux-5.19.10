@@ -19,6 +19,8 @@
 #include <linux/mdio-bitbang.h>
 #include <linux/netdevice.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
+#include <linux/of_irq.h>
 #include <linux/of_net.h>
 #include <linux/phy.h>
 #include <linux/cache.h>
@@ -50,7 +52,7 @@
  * the macros available to do this only define GCC 8.
  */
 __diag_push();
-__diag_ignore_all("-Woverride-init",
+__diag_ignore(GCC, 8, "-Woverride-init",
 	      "logic to initialize all and then override some is OK");
 static const u16 sh_eth_offset_gigabit[SH_ETH_MAX_REGISTER_OFFSET] = {
 	SH_ETH_OFFSET_DEFAULTS,
@@ -2624,7 +2626,7 @@ static int sh_eth_change_mtu(struct net_device *ndev, int new_mtu)
 	if (netif_running(ndev))
 		return -EBUSY;
 
-	WRITE_ONCE(ndev->mtu, new_mtu);
+	ndev->mtu = new_mtu;
 	netdev_update_features(ndev);
 
 	return 0;
@@ -3040,46 +3042,23 @@ static int sh_mdio_release(struct sh_eth_private *mdp)
 	return 0;
 }
 
-static int sh_mdiobb_read_c22(struct mii_bus *bus, int phy, int reg)
+static int sh_mdiobb_read(struct mii_bus *bus, int phy, int reg)
 {
 	int res;
 
 	pm_runtime_get_sync(bus->parent);
-	res = mdiobb_read_c22(bus, phy, reg);
+	res = mdiobb_read(bus, phy, reg);
 	pm_runtime_put(bus->parent);
 
 	return res;
 }
 
-static int sh_mdiobb_write_c22(struct mii_bus *bus, int phy, int reg, u16 val)
+static int sh_mdiobb_write(struct mii_bus *bus, int phy, int reg, u16 val)
 {
 	int res;
 
 	pm_runtime_get_sync(bus->parent);
-	res = mdiobb_write_c22(bus, phy, reg, val);
-	pm_runtime_put(bus->parent);
-
-	return res;
-}
-
-static int sh_mdiobb_read_c45(struct mii_bus *bus, int phy, int devad, int reg)
-{
-	int res;
-
-	pm_runtime_get_sync(bus->parent);
-	res = mdiobb_read_c45(bus, phy, devad, reg);
-	pm_runtime_put(bus->parent);
-
-	return res;
-}
-
-static int sh_mdiobb_write_c45(struct mii_bus *bus, int phy, int devad,
-			       int reg, u16 val)
-{
-	int res;
-
-	pm_runtime_get_sync(bus->parent);
-	res = mdiobb_write_c45(bus, phy, devad, reg, val);
+	res = mdiobb_write(bus, phy, reg, val);
 	pm_runtime_put(bus->parent);
 
 	return res;
@@ -3093,8 +3072,6 @@ static int sh_mdio_init(struct sh_eth_private *mdp,
 	struct bb_info *bitbang;
 	struct platform_device *pdev = mdp->pdev;
 	struct device *dev = &mdp->pdev->dev;
-	struct phy_device *phydev;
-	struct device_node *pn;
 
 	/* create bit control struct for PHY */
 	bitbang = devm_kzalloc(dev, sizeof(struct bb_info), GFP_KERNEL);
@@ -3112,10 +3089,8 @@ static int sh_mdio_init(struct sh_eth_private *mdp,
 		return -ENOMEM;
 
 	/* Wrap accessors with Runtime PM-aware ops */
-	mdp->mii_bus->read = sh_mdiobb_read_c22;
-	mdp->mii_bus->write = sh_mdiobb_write_c22;
-	mdp->mii_bus->read_c45 = sh_mdiobb_read_c45;
-	mdp->mii_bus->write_c45 = sh_mdiobb_write_c45;
+	mdp->mii_bus->read = sh_mdiobb_read;
+	mdp->mii_bus->write = sh_mdiobb_write;
 
 	/* Hook up MII support for ethtool */
 	mdp->mii_bus->name = "sh_mii";
@@ -3130,14 +3105,6 @@ static int sh_mdio_init(struct sh_eth_private *mdp,
 	ret = of_mdiobus_register(mdp->mii_bus, dev->of_node);
 	if (ret)
 		goto out_free_bus;
-
-	pn = of_parse_phandle(dev->of_node, "phy-handle", 0);
-	phydev = of_phy_find_device(pn);
-	if (phydev) {
-		phydev->mac_managed_pm = true;
-		put_device(&phydev->mdio.dev);
-	}
-	of_node_put(pn);
 
 	return 0;
 
@@ -3399,7 +3366,7 @@ static int sh_eth_drv_probe(struct platform_device *pdev)
 		goto out_release;
 	}
 
-	netif_napi_add(ndev, &mdp->napi, sh_eth_poll);
+	netif_napi_add(ndev, &mdp->napi, sh_eth_poll, 64);
 
 	/* network device register */
 	ret = register_netdev(ndev);
@@ -3431,7 +3398,7 @@ out_release:
 	return ret;
 }
 
-static void sh_eth_drv_remove(struct platform_device *pdev)
+static int sh_eth_drv_remove(struct platform_device *pdev)
 {
 	struct net_device *ndev = platform_get_drvdata(pdev);
 	struct sh_eth_private *mdp = netdev_priv(ndev);
@@ -3441,6 +3408,8 @@ static void sh_eth_drv_remove(struct platform_device *pdev)
 	sh_mdio_release(mdp);
 	pm_runtime_disable(&pdev->dev);
 	free_netdev(ndev);
+
+	return 0;
 }
 
 #ifdef CONFIG_PM
@@ -3494,12 +3463,10 @@ static int sh_eth_suspend(struct device *dev)
 
 	netif_device_detach(ndev);
 
-	rtnl_lock();
 	if (mdp->wol_enabled)
 		ret = sh_eth_wol_setup(ndev);
 	else
 		ret = sh_eth_close(ndev);
-	rtnl_unlock();
 
 	return ret;
 }
@@ -3513,12 +3480,10 @@ static int sh_eth_resume(struct device *dev)
 	if (!netif_running(ndev))
 		return 0;
 
-	rtnl_lock();
 	if (mdp->wol_enabled)
 		ret = sh_eth_wol_restore(ndev);
 	else
 		ret = sh_eth_open(ndev);
-	rtnl_unlock();
 
 	if (ret < 0)
 		return ret;

@@ -33,7 +33,7 @@
 int ioprio_check_cap(int ioprio)
 {
 	int class = IOPRIO_PRIO_CLASS(ioprio);
-	int level = IOPRIO_PRIO_LEVEL(ioprio);
+	int data = IOPRIO_PRIO_DATA(ioprio);
 
 	switch (class) {
 		case IOPRIO_CLASS_RT:
@@ -49,16 +49,15 @@ int ioprio_check_cap(int ioprio)
 			fallthrough;
 			/* rt has prio field too */
 		case IOPRIO_CLASS_BE:
-			if (level >= IOPRIO_NR_LEVELS)
+			if (data >= IOPRIO_NR_LEVELS || data < 0)
 				return -EINVAL;
 			break;
 		case IOPRIO_CLASS_IDLE:
 			break;
 		case IOPRIO_CLASS_NONE:
-			if (level)
+			if (data)
 				return -EINVAL;
 			break;
-		case IOPRIO_CLASS_INVALID:
 		default:
 			return -EINVAL;
 	}
@@ -146,38 +145,22 @@ static int get_task_ioprio(struct task_struct *p)
 	ret = security_task_getioprio(p);
 	if (ret)
 		goto out;
-	task_lock(p);
-	ret = __get_task_ioprio(p);
-	task_unlock(p);
-out:
-	return ret;
-}
-
-/*
- * Return raw IO priority value as set by userspace. We use this for
- * ioprio_get(pid, IOPRIO_WHO_PROCESS) so that we keep historical behavior and
- * also so that userspace can distinguish unset IO priority (which just gets
- * overriden based on task's nice value) from IO priority set to some value.
- */
-static int get_task_raw_ioprio(struct task_struct *p)
-{
-	int ret;
-
-	ret = security_task_getioprio(p);
-	if (ret)
-		goto out;
+	ret = IOPRIO_DEFAULT;
 	task_lock(p);
 	if (p->io_context)
 		ret = p->io_context->ioprio;
-	else
-		ret = IOPRIO_DEFAULT;
 	task_unlock(p);
 out:
 	return ret;
 }
 
-static int ioprio_best(unsigned short aprio, unsigned short bprio)
+int ioprio_best(unsigned short aprio, unsigned short bprio)
 {
+	if (!ioprio_valid(aprio))
+		aprio = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, IOPRIO_BE_NORM);
+	if (!ioprio_valid(bprio))
+		bprio = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, IOPRIO_BE_NORM);
+
 	return min(aprio, bprio);
 }
 
@@ -198,7 +181,7 @@ SYSCALL_DEFINE2(ioprio_get, int, which, int, who)
 			else
 				p = find_task_by_vpid(who);
 			if (p)
-				ret = get_task_raw_ioprio(p);
+				ret = get_task_ioprio(p);
 			break;
 		case IOPRIO_WHO_PGRP:
 			if (!who)

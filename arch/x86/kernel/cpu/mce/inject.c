@@ -33,8 +33,6 @@
 
 #include "internal.h"
 
-static bool hw_injection_possible = true;
-
 /*
  * Collect all the MCi_XXX settings
  */
@@ -229,6 +227,7 @@ static int raise_local(void)
 	} else if (m->status) {
 		pr_info("Starting machine check poll CPU %d\n", cpu);
 		raise_poll(m);
+		mce_notify_irq();
 		pr_info("Machine check poll done on CPU %d\n", cpu);
 	} else
 		m->finished = 0;
@@ -269,7 +268,8 @@ static void __maybe_unused raise_mce(struct mce *m)
 					mce_irq_ipi, NULL, 0);
 				preempt_enable();
 			} else if (m->inject_flags & MCJ_NMI_BROADCAST)
-				__apic_send_IPI_mask(mce_inject_cpumask, NMI_VECTOR);
+				apic->send_IPI_mask(mce_inject_cpumask,
+						NMI_VECTOR);
 		}
 		start = jiffies;
 		while (!cpumask_empty(mce_inject_cpumask)) {
@@ -339,8 +339,6 @@ static int __set_inj(const char *buf)
 
 	for (i = 0; i < N_INJ_TYPES; i++) {
 		if (!strncmp(flags_options[i], buf, strlen(flags_options[i]))) {
-			if (i > SW_INJ && !hw_injection_possible)
-				continue;
 			inj_type = i;
 			return 0;
 		}
@@ -429,9 +427,11 @@ static void trigger_thr_int(void *info)
 
 static u32 get_nbc_for_node(int node_id)
 {
+	struct cpuinfo_x86 *c = &boot_cpu_data;
 	u32 cores_per_node;
 
-	cores_per_node = topology_num_threads_per_package() / topology_amd_nodes_per_pkg();
+	cores_per_node = (c->x86_max_cores * smp_num_siblings) / amd_get_nodes_per_socket();
+
 	return cores_per_node * node_id;
 }
 
@@ -486,24 +486,19 @@ static void prepare_msrs(void *info)
 			wrmsrl(MSR_AMD64_SMCA_MCx_ADDR(b), m.addr);
 		}
 
+		wrmsrl(MSR_AMD64_SMCA_MCx_MISC(b), m.misc);
 		wrmsrl(MSR_AMD64_SMCA_MCx_SYND(b), m.synd);
-
-		if (m.misc)
-			wrmsrl(MSR_AMD64_SMCA_MCx_MISC(b), m.misc);
 	} else {
 		wrmsrl(MSR_IA32_MCx_STATUS(b), m.status);
 		wrmsrl(MSR_IA32_MCx_ADDR(b), m.addr);
-
-		if (m.misc)
-			wrmsrl(MSR_IA32_MCx_MISC(b), m.misc);
+		wrmsrl(MSR_IA32_MCx_MISC(b), m.misc);
 	}
 }
 
 static void do_inject(void)
 {
-	unsigned int cpu = i_mce.extcpu;
-	struct mce_hw_err err;
 	u64 mcg_status = 0;
+	unsigned int cpu = i_mce.extcpu;
 	u8 b = i_mce.bank;
 
 	i_mce.tsc = rdtsc_ordered();
@@ -517,8 +512,7 @@ static void do_inject(void)
 		i_mce.status |= MCI_STATUS_SYNDV;
 
 	if (inj_type == SW_INJ) {
-		err.m = i_mce;
-		mce_log(&err);
+		mce_log(&i_mce);
 		return;
 	}
 
@@ -546,8 +540,8 @@ static void do_inject(void)
 	if (boot_cpu_has(X86_FEATURE_AMD_DCM) &&
 	    b == 4 &&
 	    boot_cpu_data.x86 < 0x17) {
-		toggle_nb_mca_mst_cpu(topology_amd_node_id(cpu));
-		cpu = get_nbc_for_node(topology_amd_node_id(cpu));
+		toggle_nb_mca_mst_cpu(topology_die_id(cpu));
+		cpu = get_nbc_for_node(topology_die_id(cpu));
 	}
 
 	cpus_read_lock();
@@ -723,54 +717,10 @@ static void __init debugfs_init(void)
 				    &i_mce, dfs_fls[i].fops);
 }
 
-static void check_hw_inj_possible(void)
-{
-	int cpu;
-	u8 bank;
-
-	/*
-	 * This behavior exists only on SMCA systems though its not directly
-	 * related to SMCA.
-	 */
-	if (!cpu_feature_enabled(X86_FEATURE_SMCA))
-		return;
-
-	cpu = get_cpu();
-
-	for (bank = 0; bank < MAX_NR_BANKS; ++bank) {
-		u64 status = MCI_STATUS_VAL, ipid;
-
-		/* Check whether bank is populated */
-		rdmsrl(MSR_AMD64_SMCA_MCx_IPID(bank), ipid);
-		if (!ipid)
-			continue;
-
-		toggle_hw_mce_inject(cpu, true);
-
-		wrmsrl_safe(mca_msr_reg(bank, MCA_STATUS), status);
-		rdmsrl_safe(mca_msr_reg(bank, MCA_STATUS), &status);
-		wrmsrl_safe(mca_msr_reg(bank, MCA_STATUS), 0);
-
-		if (!status) {
-			hw_injection_possible = false;
-			pr_warn("Platform does not allow *hardware* error injection."
-				"Try using APEI EINJ instead.\n");
-		}
-
-		toggle_hw_mce_inject(cpu, false);
-
-		break;
-	}
-
-	put_cpu();
-}
-
 static int __init inject_init(void)
 {
 	if (!alloc_cpumask_var(&mce_inject_cpumask, GFP_KERNEL))
 		return -ENOMEM;
-
-	check_hw_inj_possible();
 
 	debugfs_init();
 
@@ -800,5 +750,4 @@ static void __exit inject_exit(void)
 
 module_init(inject_init);
 module_exit(inject_exit);
-MODULE_DESCRIPTION("Machine check injection support");
 MODULE_LICENSE("GPL");

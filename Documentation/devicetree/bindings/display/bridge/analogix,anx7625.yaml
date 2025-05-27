@@ -2,8 +2,8 @@
 # Copyright 2019 Analogix Semiconductor, Inc.
 %YAML 1.2
 ---
-$id: http://devicetree.org/schemas/display/bridge/analogix,anx7625.yaml#
-$schema: http://devicetree.org/meta-schemas/core.yaml#
+$id: "http://devicetree.org/schemas/display/bridge/analogix,anx7625.yaml#"
+$schema: "http://devicetree.org/meta-schemas/core.yaml#"
 
 title: Analogix ANX7625 SlimPort (4K Mobile HD Transmitter)
 
@@ -16,7 +16,8 @@ description: |
 
 properties:
   compatible:
-    const: analogix,anx7625
+    items:
+      - const: analogix,anx7625
 
   reg:
     maxItems: 1
@@ -93,22 +94,7 @@ properties:
         $ref: /schemas/graph.yaml#/$defs/port-base
         unevaluatedProperties: false
         description:
-          MIPI DSI/DPI input.
-
-        properties:
-          endpoint:
-            $ref: /schemas/media/video-interfaces.yaml#
-            type: object
-            additionalProperties: false
-
-            properties:
-              remote-endpoint: true
-
-              bus-type:
-                enum: [7]
-                default: 1
-
-              data-lanes: true
+          Video port for MIPI DSI input.
 
       port@1:
         $ref: /schemas/graph.yaml#/properties/port
@@ -133,7 +119,7 @@ examples:
   - |
     #include <dt-bindings/gpio/gpio.h>
 
-    i2c {
+    i2c0 {
         #address-cells = <1>;
         #size-cells = <0>;
 
@@ -157,8 +143,6 @@ examples:
                     reg = <0>;
                     anx7625_in: endpoint {
                         remote-endpoint = <&mipi_dsi>;
-                        bus-type = <7>;
-                        data-lanes = <0 1 2 3>;
                     };
                 };
 

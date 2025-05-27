@@ -1559,6 +1559,8 @@ static const struct vb2_ops delta_vb2_au_ops = {
 	.queue_setup = delta_vb2_au_queue_setup,
 	.buf_prepare = delta_vb2_au_prepare,
 	.buf_queue = delta_vb2_au_queue,
+	.wait_prepare = vb2_ops_wait_prepare,
+	.wait_finish = vb2_ops_wait_finish,
 	.start_streaming = delta_vb2_au_start_streaming,
 	.stop_streaming = delta_vb2_au_stop_streaming,
 };
@@ -1568,6 +1570,8 @@ static const struct vb2_ops delta_vb2_frame_ops = {
 	.buf_prepare = delta_vb2_frame_prepare,
 	.buf_finish = delta_vb2_frame_finish,
 	.buf_queue = delta_vb2_frame_queue,
+	.wait_prepare = vb2_ops_wait_prepare,
+	.wait_finish = vb2_ops_wait_finish,
 	.stop_streaming = delta_vb2_frame_stop_streaming,
 };
 
@@ -1665,12 +1669,14 @@ static int delta_open(struct file *file)
 	set_default_params(ctx);
 
 	/* enable ST231 clocks */
-	if (clk_prepare_enable(delta->clk_st231))
-		dev_warn(delta->dev, "failed to enable st231 clk\n");
+	if (delta->clk_st231)
+		if (clk_prepare_enable(delta->clk_st231))
+			dev_warn(delta->dev, "failed to enable st231 clk\n");
 
 	/* enable FLASH_PROMIP clock */
-	if (clk_prepare_enable(delta->clk_flash_promip))
-		dev_warn(delta->dev, "failed to enable delta promip clk\n");
+	if (delta->clk_flash_promip)
+		if (clk_prepare_enable(delta->clk_flash_promip))
+			dev_warn(delta->dev, "failed to enable delta promip clk\n");
 
 	mutex_unlock(&delta->lock);
 
@@ -1711,10 +1717,12 @@ static int delta_release(struct file *file)
 	v4l2_fh_exit(&ctx->fh);
 
 	/* disable ST231 clocks */
-	clk_disable_unprepare(delta->clk_st231);
+	if (delta->clk_st231)
+		clk_disable_unprepare(delta->clk_st231);
 
 	/* disable FLASH_PROMIP clock */
-	clk_disable_unprepare(delta->clk_flash_promip);
+	if (delta->clk_flash_promip)
+		clk_disable_unprepare(delta->clk_flash_promip);
 
 	dev_dbg(delta->dev, "%s decoder instance released\n", ctx->name);
 
@@ -1896,7 +1904,7 @@ err:
 	return ret;
 }
 
-static void delta_remove(struct platform_device *pdev)
+static int delta_remove(struct platform_device *pdev)
 {
 	struct delta_dev *delta = platform_get_drvdata(pdev);
 
@@ -1910,13 +1918,16 @@ static void delta_remove(struct platform_device *pdev)
 	pm_runtime_disable(delta->dev);
 
 	v4l2_device_unregister(&delta->v4l2_dev);
+
+	return 0;
 }
 
 static int delta_runtime_suspend(struct device *dev)
 {
 	struct delta_dev *delta = dev_get_drvdata(dev);
 
-	clk_disable_unprepare(delta->clk_delta);
+	if (delta->clk_delta)
+		clk_disable_unprepare(delta->clk_delta);
 
 	return 0;
 }
@@ -1925,8 +1936,9 @@ static int delta_runtime_resume(struct device *dev)
 {
 	struct delta_dev *delta = dev_get_drvdata(dev);
 
-	if (clk_prepare_enable(delta->clk_delta))
-		dev_warn(dev, "failed to prepare/enable delta clk\n");
+	if (delta->clk_delta)
+		if (clk_prepare_enable(delta->clk_delta))
+			dev_warn(dev, "failed to prepare/enable delta clk\n");
 
 	return 0;
 }

@@ -28,9 +28,11 @@ properties:
       - const: qcom,ssc-block-bus
 
   reg:
-    items:
-      - description: SSCAON_CONFIG0 registers
-      - description: SSCAON_CONFIG1 registers
+    description: |
+      Shall contain the addresses of the SSCAON_CONFIG0 and SSCAON_CONFIG1
+      registers
+    minItems: 2
+    maxItems: 2
 
   reg-names:
     items:
@@ -46,6 +48,7 @@ properties:
   ranges: true
 
   clocks:
+    minItems: 6
     maxItems: 6
 
   clock-names:
@@ -58,9 +61,9 @@ properties:
       - const: ssc_ahbs
 
   power-domains:
-    items:
-      - description: CX power domain
-      - description: MX power domain
+    description: Power domain phandles for the ssc_cx and ssc_mx power domains
+    minItems: 2
+    maxItems: 2
 
   power-domain-names:
     items:
@@ -68,11 +71,11 @@ properties:
       - const: ssc_mx
 
   resets:
-    items:
-      - description: Main reset
-      - description:
-          SSC Branch Control Register reset (associated with the ssc_xo and
-          ssc_ahbs clocks)
+    description: |
+      Reset phandles for the ssc_reset and ssc_bcr resets (note: ssc_bcr is the
+      branch control register associated with the ssc_xo and ssc_ahbs clocks)
+    minItems: 2
+    maxItems: 2
 
   reset-names:
     items:

@@ -163,8 +163,8 @@ static void xbox_remote_rc_init(struct xbox_remote *xbox_remote)
 	rdev->dev.parent = &xbox_remote->interface->dev;
 }
 
-static void xbox_remote_initialize(struct xbox_remote *xbox_remote,
-				   struct usb_endpoint_descriptor *endpoint_in)
+static int xbox_remote_initialize(struct xbox_remote *xbox_remote,
+				  struct usb_endpoint_descriptor *endpoint_in)
 {
 	struct usb_device *udev = xbox_remote->udev;
 	int pipe, maxp;
@@ -177,6 +177,8 @@ static void xbox_remote_initialize(struct xbox_remote *xbox_remote,
 	usb_fill_int_urb(xbox_remote->irq_urb, udev, pipe, xbox_remote->inbuf,
 			 maxp, xbox_remote_irq_in, xbox_remote,
 			 endpoint_in->bInterval);
+
+	return 0;
 }
 
 /*
@@ -247,7 +249,9 @@ static int xbox_remote_probe(struct usb_interface *interface,
 	xbox_remote_rc_init(xbox_remote);
 
 	/* Device Hardware Initialization */
-	xbox_remote_initialize(xbox_remote, endpoint_in);
+	err = xbox_remote_initialize(xbox_remote, endpoint_in);
+	if (err)
+		goto exit_kill_urbs;
 
 	/* Set up and register rc device */
 	err = rc_register_device(xbox_remote->rdev);

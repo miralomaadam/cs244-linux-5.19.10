@@ -41,7 +41,7 @@ void x25_start_heartbeat(struct sock *sk)
 
 void x25_stop_heartbeat(struct sock *sk)
 {
-	timer_delete(&sk->sk_timer);
+	del_timer(&sk->sk_timer);
 }
 
 void x25_start_t2timer(struct sock *sk)
@@ -74,7 +74,7 @@ void x25_start_t23timer(struct sock *sk)
 
 void x25_stop_timer(struct sock *sk)
 {
-	timer_delete(&x25_sk(sk)->timer);
+	del_timer(&x25_sk(sk)->timer);
 }
 
 unsigned long x25_display_timer(struct sock *sk)

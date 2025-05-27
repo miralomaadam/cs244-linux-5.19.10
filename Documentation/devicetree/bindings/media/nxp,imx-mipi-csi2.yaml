@@ -22,14 +22,9 @@ description: |-
 
 properties:
   compatible:
-    oneOf:
-      - enum:
-          - fsl,imx7-mipi-csi2
-          - fsl,imx8mm-mipi-csi2
-      - items:
-          - enum:
-              - fsl,imx8mp-mipi-csi2
-          - const: fsl,imx8mm-mipi-csi2
+    enum:
+      - fsl,imx7-mipi-csi2
+      - fsl,imx8mm-mipi-csi2
 
   reg:
     maxItems: 1

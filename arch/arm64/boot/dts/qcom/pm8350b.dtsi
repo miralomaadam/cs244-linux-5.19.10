@@ -8,9 +8,9 @@
 
 / {
 	thermal-zones {
-		pm8350b_thermal: pm8350b-thermal {
+		pm8350b_thermal: pm8350c-thermal {
 			polling-delay-passive = <100>;
-
+			polling-delay = <0>;
 			thermal-sensors = <&pm8350b_temp_alarm>;
 
 			trips {
@@ -45,10 +45,9 @@
 		};
 
 		pm8350b_gpios: gpio@8800 {
-			compatible = "qcom,pm8350b-gpio", "qcom,spmi-gpio";
+			compatible = "qcom,pm8350b-gpio";
 			reg = <0x8800>;
 			gpio-controller;
-			gpio-ranges = <&pm8350b_gpios 0 0 8>;
 			#gpio-cells = <2>;
 			interrupt-controller;
 			#interrupt-cells = <2>;

@@ -117,7 +117,7 @@ int wl1271_recalc_rx_streaming(struct wl1271 *wl, struct wl12xx_vif *wlvif)
 	else {
 		ret = wl1271_set_rx_streaming(wl, wlvif, false);
 		/* don't cancel_work_sync since we might deadlock */
-		timer_delete_sync(&wlvif->rx_streaming_timer);
+		del_timer_sync(&wlvif->rx_streaming_timer);
 	}
 out:
 	return ret;
@@ -379,8 +379,6 @@ static void wl12xx_irq_update_links_status(struct wl1271 *wl,
 
 static int wlcore_fw_status(struct wl1271 *wl, struct wl_fw_status *status)
 {
-	struct wl12xx_vif *wlvifsta;
-	struct wl12xx_vif *wlvifap;
 	struct wl12xx_vif *wlvif;
 	u32 old_tx_blk_count = wl->tx_blocks_available;
 	int avail, freed_blocks;
@@ -394,7 +392,7 @@ static int wlcore_fw_status(struct wl1271 *wl, struct wl_fw_status *status)
 	if (ret < 0)
 		return ret;
 
-	wlcore_hw_convert_fw_status(wl, wl->raw_fw_status, status);
+	wlcore_hw_convert_fw_status(wl, wl->raw_fw_status, wl->fw_status);
 
 	wl1271_debug(DEBUG_IRQ, "intr: 0x%x (fw_rx_counter = %d, "
 		     "drv_rx_counter = %d, tx_results_counter = %d)",
@@ -412,100 +410,23 @@ static int wlcore_fw_status(struct wl1271 *wl, struct wl_fw_status *status)
 		wl->tx_pkts_freed[i] = status->counters.tx_released_pkts[i];
 	}
 
-	/* Find an authorized STA vif */
-	wlvifsta = NULL;
-	wl12xx_for_each_wlvif_sta(wl, wlvif) {
-		if (wlvif->sta.hlid != WL12XX_INVALID_LINK_ID &&
-		    test_bit(WLVIF_FLAG_STA_AUTHORIZED, &wlvif->flags)) {
-			wlvifsta = wlvif;
-			break;
-		}
-	}
-
-	/* Find a started AP vif */
-	wlvifap = NULL;
-	wl12xx_for_each_wlvif(wl, wlvif) {
-		if (wlvif->bss_type == BSS_TYPE_AP_BSS &&
-		    wlvif->inconn_count == 0 &&
-		    test_bit(WLVIF_FLAG_AP_STARTED, &wlvif->flags)) {
-			wlvifap = wlvif;
-			break;
-		}
-	}
 
 	for_each_set_bit(i, wl->links_map, wl->num_links) {
-		u16 diff16, sec_pn16;
-		u8 diff, tx_lnk_free_pkts;
-
+		u8 diff;
 		lnk = &wl->links[i];
 
 		/* prevent wrap-around in freed-packets counter */
-		tx_lnk_free_pkts = status->counters.tx_lnk_free_pkts[i];
-		diff = (tx_lnk_free_pkts - lnk->prev_freed_pkts) & 0xff;
+		diff = (status->counters.tx_lnk_free_pkts[i] -
+		       lnk->prev_freed_pkts) & 0xff;
 
-		if (diff) {
-			lnk->allocated_pkts -= diff;
-			lnk->prev_freed_pkts = tx_lnk_free_pkts;
-		}
-
-		/* Get the current sec_pn16 value if present */
-		if (status->counters.tx_lnk_sec_pn16)
-			sec_pn16 = __le16_to_cpu(status->counters.tx_lnk_sec_pn16[i]);
-		else
-			sec_pn16 = 0;
-		/* prevent wrap-around in pn16 counter */
-		diff16 = (sec_pn16 - lnk->prev_sec_pn16) & 0xffff;
-
-		/* FIXME: since free_pkts is a 8-bit counter of packets that
-		 * rolls over, it can become zero. If it is zero, then we
-		 * omit processing below. Is that really correct?
-		 */
-		if (tx_lnk_free_pkts <= 0)
+		if (diff == 0)
 			continue;
 
-		/* For a station that has an authorized link: */
-		if (wlvifsta && wlvifsta->sta.hlid == i) {
-			if (wlvifsta->encryption_type == KEY_TKIP ||
-			    wlvifsta->encryption_type == KEY_AES) {
-				if (diff16) {
-					lnk->prev_sec_pn16 = sec_pn16;
-					/* accumulate the prev_freed_pkts
-					 * counter according to the PN from
-					 * firmware
-					 */
-					lnk->total_freed_pkts += diff16;
-				}
-			} else {
-				if (diff)
-					/* accumulate the prev_freed_pkts
-					 * counter according to the free packets
-					 * count from firmware
-					 */
-					lnk->total_freed_pkts += diff;
-			}
-		}
+		lnk->allocated_pkts -= diff;
+		lnk->prev_freed_pkts = status->counters.tx_lnk_free_pkts[i];
 
-		/* For an AP that has been started */
-		if (wlvifap && test_bit(i, wlvifap->ap.sta_hlid_map)) {
-			if (wlvifap->encryption_type == KEY_TKIP ||
-			    wlvifap->encryption_type == KEY_AES) {
-				if (diff16) {
-					lnk->prev_sec_pn16 = sec_pn16;
-					/* accumulate the prev_freed_pkts
-					 * counter according to the PN from
-					 * firmware
-					 */
-					lnk->total_freed_pkts += diff16;
-				}
-			} else {
-				if (diff)
-					/* accumulate the prev_freed_pkts
-					 * counter according to the free packets
-					 * count from firmware
-					 */
-					lnk->total_freed_pkts += diff;
-			}
-		}
+		/* accumulate the prev_freed_pkts counter */
+		lnk->total_freed_pkts += diff;
 	}
 
 	/* prevent wrap-around in total blocks counter */
@@ -1205,7 +1126,7 @@ int wl1271_plt_start(struct wl1271 *wl, const enum plt_mode plt_mode)
 
 		/* update hw/fw version info in wiphy struct */
 		wiphy->hw_version = wl->chip.id;
-		strscpy(wiphy->fw_version, wl->chip.fw_ver_str,
+		strncpy(wiphy->fw_version, wl->chip.fw_ver_str,
 			sizeof(wiphy->fw_version));
 
 		goto out;
@@ -2085,7 +2006,7 @@ static void wlcore_op_stop_locked(struct wl1271 *wl)
 	memset(wl->reg_ch_conf_last, 0, sizeof(wl->reg_ch_conf_last));
 }
 
-static void wlcore_op_stop(struct ieee80211_hw *hw, bool suspend)
+static void wlcore_op_stop(struct ieee80211_hw *hw)
 {
 	struct wl1271 *wl = hw->priv;
 
@@ -2122,7 +2043,7 @@ static void wlcore_channel_switch_work(struct work_struct *work)
 		goto out;
 
 	vif = wl12xx_wlvif_to_vif(wlvif);
-	ieee80211_chswitch_done(vif, false, 0);
+	ieee80211_chswitch_done(vif, false);
 
 	ret = pm_runtime_resume_and_get(wl->dev);
 	if (ret < 0)
@@ -2423,7 +2344,7 @@ power_off:
 
 	/* update hw/fw version info in wiphy struct */
 	wiphy->hw_version = wl->chip.id;
-	strscpy(wiphy->fw_version, wl->chip.fw_ver_str,
+	strncpy(wiphy->fw_version, wl->chip.fw_ver_str,
 		sizeof(wiphy->fw_version));
 
 	/*
@@ -2612,24 +2533,24 @@ static int wl1271_op_add_interface(struct ieee80211_hw *hw,
 	if (test_bit(WL1271_FLAG_RECOVERY_IN_PROGRESS, &wl->flags) ||
 	    test_bit(WLVIF_FLAG_INITIALIZED, &wlvif->flags)) {
 		ret = -EBUSY;
-		goto out_unlock;
+		goto out;
 	}
 
 
 	ret = wl12xx_init_vif_data(wl, vif);
 	if (ret < 0)
-		goto out_unlock;
+		goto out;
 
 	wlvif->wl = wl;
 	role_type = wl12xx_get_role_type(wl, wlvif);
 	if (role_type == WL12XX_INVALID_ROLE_TYPE) {
 		ret = -EINVAL;
-		goto out_unlock;
+		goto out;
 	}
 
 	ret = wlcore_allocate_hw_queue_base(wl, wlvif);
 	if (ret < 0)
-		goto out_unlock;
+		goto out;
 
 	/*
 	 * TODO: after the nvs issue will be solved, move this block
@@ -2644,7 +2565,7 @@ static int wl1271_op_add_interface(struct ieee80211_hw *hw,
 
 		ret = wl12xx_init_fw(wl);
 		if (ret < 0)
-			goto out_unlock;
+			goto out;
 	}
 
 	/*
@@ -2841,7 +2762,7 @@ deinit:
 unlock:
 	mutex_unlock(&wl->mutex);
 
-	timer_delete_sync(&wlvif->rx_streaming_timer);
+	del_timer_sync(&wlvif->rx_streaming_timer);
 	cancel_work_sync(&wlvif->rx_streaming_enable_work);
 	cancel_work_sync(&wlvif->rx_streaming_disable_work);
 	cancel_work_sync(&wlvif->rc_update_work);
@@ -2983,13 +2904,11 @@ static int wlcore_set_assoc(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 			    struct ieee80211_bss_conf *bss_conf,
 			    u32 sta_rate_set)
 {
-	struct ieee80211_vif *vif = container_of(bss_conf, struct ieee80211_vif,
-						 bss_conf);
 	int ieoffset;
 	int ret;
 
-	wlvif->aid = vif->cfg.aid;
-	wlvif->channel_type = cfg80211_get_chandef_type(&bss_conf->chanreq.oper);
+	wlvif->aid = bss_conf->aid;
+	wlvif->channel_type = cfg80211_get_chandef_type(&bss_conf->chandef);
 	wlvif->beacon_int = bss_conf->beacon_int;
 	wlvif->wmm_enabled = bss_conf->qos;
 
@@ -3109,7 +3028,7 @@ static int wlcore_unset_assoc(struct wl1271 *wl, struct wl12xx_vif *wlvif)
 		struct ieee80211_vif *vif = wl12xx_wlvif_to_vif(wlvif);
 
 		wl12xx_cmd_stop_channel_switch(wl, wlvif);
-		ieee80211_chswitch_done(vif, false, 0);
+		ieee80211_chswitch_done(vif, false);
 		cancel_delayed_work(&wlvif->channel_switch_work);
 	}
 
@@ -3616,10 +3535,6 @@ int wlcore_set_key(struct wl1271 *wl, enum set_key_cmd cmd,
 			return ret;
 		}
 
-		/* Store AP encryption key type */
-		if (wlvif->bss_type == BSS_TYPE_AP_BSS)
-			wlvif->encryption_type = key_type;
-
 		/*
 		 * reconfiguring arp response if the unicast (or common)
 		 * encryption key type was changed
@@ -4020,6 +3935,7 @@ static int wl1271_ap_set_probe_resp_tmpl_legacy(struct wl1271 *wl,
 					     u32 rates)
 {
 	struct wl12xx_vif *wlvif = wl12xx_vif_to_data(vif);
+	struct ieee80211_bss_conf *bss_conf = &vif->bss_conf;
 	u8 probe_rsp_templ[WL1271_CMD_TEMPL_MAX_SIZE];
 	int ssid_ie_offset, ie_offset, templ_len;
 	const u8 *ptr;
@@ -4032,7 +3948,7 @@ static int wl1271_ap_set_probe_resp_tmpl_legacy(struct wl1271 *wl,
 					       probe_rsp_len, 0,
 					       rates);
 
-	if (probe_rsp_len + vif->cfg.ssid_len > WL1271_CMD_TEMPL_MAX_SIZE) {
+	if (probe_rsp_len + bss_conf->ssid_len > WL1271_CMD_TEMPL_MAX_SIZE) {
 		wl1271_error("probe_rsp template too big");
 		return -EINVAL;
 	}
@@ -4054,12 +3970,12 @@ static int wl1271_ap_set_probe_resp_tmpl_legacy(struct wl1271 *wl,
 
 	/* insert SSID from bss_conf */
 	probe_rsp_templ[ssid_ie_offset] = WLAN_EID_SSID;
-	probe_rsp_templ[ssid_ie_offset + 1] = vif->cfg.ssid_len;
+	probe_rsp_templ[ssid_ie_offset + 1] = bss_conf->ssid_len;
 	memcpy(probe_rsp_templ + ssid_ie_offset + 2,
-	       vif->cfg.ssid, vif->cfg.ssid_len);
-	templ_len = ssid_ie_offset + 2 + vif->cfg.ssid_len;
+	       bss_conf->ssid, bss_conf->ssid_len);
+	templ_len = ssid_ie_offset + 2 + bss_conf->ssid_len;
 
-	memcpy(probe_rsp_templ + ssid_ie_offset + 2 + vif->cfg.ssid_len,
+	memcpy(probe_rsp_templ + ssid_ie_offset + 2 + bss_conf->ssid_len,
 	       ptr, probe_rsp_len - (ptr - probe_rsp_data));
 	templ_len += probe_rsp_len - (ptr - probe_rsp_data);
 
@@ -4122,7 +4038,7 @@ static int wlcore_set_beacon_template(struct wl1271 *wl,
 	u32 min_rate;
 	int ret;
 	int ieoffset = offsetof(struct ieee80211_mgmt, u.beacon.variable);
-	struct sk_buff *beacon = ieee80211_beacon_get(wl->hw, vif, 0);
+	struct sk_buff *beacon = ieee80211_beacon_get(wl->hw, vif);
 	u16 tmpl_id;
 
 	if (!beacon) {
@@ -4325,7 +4241,7 @@ static void wl1271_bss_info_changed_ap(struct wl1271 *wl,
 
 	/* Handle HT information change */
 	if ((changed & BSS_CHANGED_HT) &&
-	    (bss_conf->chanreq.oper.width != NL80211_CHAN_WIDTH_20_NOHT)) {
+	    (bss_conf->chandef.width != NL80211_CHAN_WIDTH_20_NOHT)) {
 		ret = wl1271_acx_set_ht_information(wl, wlvif,
 					bss_conf->ht_operation_mode);
 		if (ret < 0) {
@@ -4339,15 +4255,15 @@ out:
 }
 
 static int wlcore_set_bssid(struct wl1271 *wl, struct wl12xx_vif *wlvif,
-			    struct ieee80211_vif *vif, u32 sta_rate_set)
+			    struct ieee80211_bss_conf *bss_conf,
+			    u32 sta_rate_set)
 {
-	struct ieee80211_bss_conf *bss_conf = &vif->bss_conf;
 	u32 rates;
 	int ret;
 
 	wl1271_debug(DEBUG_MAC80211,
 	     "changed_bssid: %pM, aid: %d, bcn_int: %d, brates: 0x%x sta_rate_set: 0x%x",
-	     bss_conf->bssid, vif->cfg.aid,
+	     bss_conf->bssid, bss_conf->aid,
 	     bss_conf->beacon_int,
 	     bss_conf->basic_rates, sta_rate_set);
 
@@ -4435,7 +4351,7 @@ static void wl1271_bss_info_changed_sta(struct wl1271 *wl,
 	}
 
 	if (changed & BSS_CHANGED_IBSS) {
-		if (vif->cfg.ibss_joined) {
+		if (bss_conf->ibss_joined) {
 			set_bit(WLVIF_FLAG_IBSS_JOINED, &wlvif->flags);
 			ibss_joined = true;
 		} else {
@@ -4459,7 +4375,7 @@ static void wl1271_bss_info_changed_sta(struct wl1271 *wl,
 	}
 
 	if (changed & BSS_CHANGED_IDLE && !is_ibss)
-		wl1271_sta_handle_idle(wl, wlvif, vif->cfg.idle);
+		wl1271_sta_handle_idle(wl, wlvif, bss_conf->idle);
 
 	if (changed & BSS_CHANGED_CQM) {
 		bool enable = false;
@@ -4495,7 +4411,7 @@ static void wl1271_bss_info_changed_sta(struct wl1271 *wl,
 
 	if (changed & BSS_CHANGED_BSSID) {
 		if (!is_zero_ether_addr(bss_conf->bssid)) {
-			ret = wlcore_set_bssid(wl, wlvif, vif,
+			ret = wlcore_set_bssid(wl, wlvif, bss_conf,
 					       sta_rate_set);
 			if (ret < 0)
 				goto out;
@@ -4511,9 +4427,9 @@ static void wl1271_bss_info_changed_sta(struct wl1271 *wl,
 
 	if (changed & BSS_CHANGED_IBSS) {
 		wl1271_debug(DEBUG_ADHOC, "ibss_joined: %d",
-			     vif->cfg.ibss_joined);
+			     bss_conf->ibss_joined);
 
-		if (vif->cfg.ibss_joined) {
+		if (bss_conf->ibss_joined) {
 			u32 rates = bss_conf->basic_rates;
 			wlvif->basic_rate_set =
 				wl1271_tx_enabled_rates_get(wl, rates,
@@ -4550,7 +4466,7 @@ static void wl1271_bss_info_changed_sta(struct wl1271 *wl,
 	}
 
 	if (changed & BSS_CHANGED_ASSOC) {
-		if (vif->cfg.assoc) {
+		if (bss_conf->assoc) {
 			ret = wlcore_set_assoc(wl, wlvif, bss_conf,
 					       sta_rate_set);
 			if (ret < 0)
@@ -4564,7 +4480,7 @@ static void wl1271_bss_info_changed_sta(struct wl1271 *wl,
 	}
 
 	if (changed & BSS_CHANGED_PS) {
-		if (vif->cfg.ps &&
+		if ((bss_conf->ps) &&
 		    test_bit(WLVIF_FLAG_STA_ASSOCIATED, &wlvif->flags) &&
 		    !test_bit(WLVIF_FLAG_IN_PS, &wlvif->flags)) {
 			int ps_mode;
@@ -4584,7 +4500,7 @@ static void wl1271_bss_info_changed_sta(struct wl1271 *wl,
 			if (ret < 0)
 				wl1271_warning("enter %s ps failed %d",
 					       ps_mode_str, ret);
-		} else if (!vif->cfg.ps &&
+		} else if (!bss_conf->ps &&
 			   test_bit(WLVIF_FLAG_IN_PS, &wlvif->flags)) {
 			wl1271_debug(DEBUG_PSM, "auto ps disabled");
 
@@ -4598,7 +4514,7 @@ static void wl1271_bss_info_changed_sta(struct wl1271 *wl,
 	/* Handle new association with HT. Do this after join. */
 	if (sta_exists) {
 		bool enabled =
-			bss_conf->chanreq.oper.width != NL80211_CHAN_WIDTH_20_NOHT;
+			bss_conf->chandef.width != NL80211_CHAN_WIDTH_20_NOHT;
 
 		ret = wlcore_hw_set_peer_cap(wl,
 					     &sta_ht_cap,
@@ -4625,11 +4541,11 @@ static void wl1271_bss_info_changed_sta(struct wl1271 *wl,
 	/* Handle arp filtering. Done after join. */
 	if ((changed & BSS_CHANGED_ARP_FILTER) ||
 	    (!is_ibss && (changed & BSS_CHANGED_QOS))) {
-		__be32 addr = vif->cfg.arp_addr_list[0];
+		__be32 addr = bss_conf->arp_addr_list[0];
 		wlvif->sta.qos = bss_conf->qos;
 		WARN_ON(wlvif->bss_type != BSS_TYPE_STA_BSS);
 
-		if (vif->cfg.arp_addr_cnt == 1 && vif->cfg.assoc) {
+		if (bss_conf->arp_addr_cnt == 1 && bss_conf->assoc) {
 			wlvif->ip_addr = addr;
 			/*
 			 * The template should have been configured only upon
@@ -4663,7 +4579,7 @@ out:
 static void wl1271_op_bss_info_changed(struct ieee80211_hw *hw,
 				       struct ieee80211_vif *vif,
 				       struct ieee80211_bss_conf *bss_conf,
-				       u64 changed)
+				       u32 changed)
 {
 	struct wl1271 *wl = hw->priv;
 	struct wl12xx_vif *wlvif = wl12xx_vif_to_data(vif);
@@ -4784,7 +4700,6 @@ out:
 
 static int wlcore_op_assign_vif_chanctx(struct ieee80211_hw *hw,
 					struct ieee80211_vif *vif,
-					struct ieee80211_bss_conf *link_conf,
 					struct ieee80211_chanctx_conf *ctx)
 {
 	struct wl1271 *wl = hw->priv;
@@ -4835,7 +4750,6 @@ out:
 
 static void wlcore_op_unassign_vif_chanctx(struct ieee80211_hw *hw,
 					   struct ieee80211_vif *vif,
-					   struct ieee80211_bss_conf *link_conf,
 					   struct ieee80211_chanctx_conf *ctx)
 {
 	struct wl1271 *wl = hw->priv;
@@ -4947,8 +4861,7 @@ out:
 }
 
 static int wl1271_op_conf_tx(struct ieee80211_hw *hw,
-			     struct ieee80211_vif *vif,
-			     unsigned int link_id, u16 queue,
+			     struct ieee80211_vif *vif, u16 queue,
 			     const struct ieee80211_tx_queue_params *params)
 {
 	struct wl1271 *wl = hw->priv;
@@ -5222,23 +5135,19 @@ static int wl12xx_update_sta_state(struct wl1271 *wl,
 
 	/* Add station (AP mode) */
 	if (is_ap &&
-	    old_state == IEEE80211_STA_AUTH &&
-	    new_state == IEEE80211_STA_ASSOC) {
+	    old_state == IEEE80211_STA_NOTEXIST &&
+	    new_state == IEEE80211_STA_NONE) {
 		ret = wl12xx_sta_add(wl, wlvif, sta);
 		if (ret)
 			return ret;
-
-		wl_sta->fw_added = true;
 
 		wlcore_update_inconn_sta(wl, wlvif, wl_sta, true);
 	}
 
 	/* Remove station (AP mode) */
 	if (is_ap &&
-	    old_state == IEEE80211_STA_ASSOC &&
-	    new_state == IEEE80211_STA_AUTH) {
-		wl_sta->fw_added = false;
-
+	    old_state == IEEE80211_STA_NONE &&
+	    new_state == IEEE80211_STA_NOTEXIST) {
 		/* must not fail */
 		wl12xx_sta_remove(wl, wlvif, sta);
 
@@ -5249,6 +5158,11 @@ static int wl12xx_update_sta_state(struct wl1271 *wl,
 	if (is_ap &&
 	    new_state == IEEE80211_STA_AUTHORIZED) {
 		ret = wl12xx_cmd_set_peer_state(wl, wlvif, wl_sta->hlid);
+		if (ret < 0)
+			return ret;
+
+		/* reconfigure rates */
+		ret = wl12xx_cmd_add_peer(wl, wlvif, sta, wl_sta->hlid);
 		if (ret < 0)
 			return ret;
 
@@ -5533,7 +5447,7 @@ static void wl12xx_op_channel_switch(struct ieee80211_hw *hw,
 
 	if (unlikely(wl->state == WLCORE_STATE_OFF)) {
 		if (test_bit(WLVIF_FLAG_STA_ASSOCIATED, &wlvif->flags))
-			ieee80211_chswitch_done(vif, false, 0);
+			ieee80211_chswitch_done(vif, false);
 		goto out;
 	} else if (unlikely(wl->state != WLCORE_STATE_ON)) {
 		goto out;
@@ -5576,7 +5490,7 @@ static const void *wlcore_get_beacon_ie(struct wl1271 *wl,
 {
 	int ieoffset = offsetof(struct ieee80211_mgmt, u.beacon.variable);
 	struct sk_buff *beacon =
-		ieee80211_beacon_get(wl->hw, wl12xx_wlvif_to_vif(wlvif), 0);
+		ieee80211_beacon_get(wl->hw, wl12xx_wlvif_to_vif(wlvif));
 
 	if (!beacon)
 		return NULL;
@@ -5789,10 +5703,9 @@ static int wlcore_op_cancel_remain_on_channel(struct ieee80211_hw *hw,
 
 static void wlcore_op_sta_rc_update(struct ieee80211_hw *hw,
 				    struct ieee80211_vif *vif,
-				    struct ieee80211_link_sta *link_sta,
+				    struct ieee80211_sta *sta,
 				    u32 changed)
 {
-	struct ieee80211_sta *sta = link_sta->sta;
 	struct wl12xx_vif *wlvif = wl12xx_vif_to_data(vif);
 
 	wl1271_debug(DEBUG_MAC80211, "mac80211 sta_rc_update");
@@ -6025,7 +5938,6 @@ static const struct ieee80211_ops wl1271_ops = {
 	.prepare_multicast = wl1271_op_prepare_multicast,
 	.configure_filter = wl1271_op_configure_filter,
 	.tx = wl1271_op_tx,
-	.wake_tx_queue = ieee80211_handle_wake_tx_queue,
 	.set_key = wlcore_op_set_key,
 	.hw_scan = wl1271_op_hw_scan,
 	.cancel_hw_scan = wl1271_op_cancel_hw_scan,
@@ -6053,7 +5965,7 @@ static const struct ieee80211_ops wl1271_ops = {
 	.assign_vif_chanctx = wlcore_op_assign_vif_chanctx,
 	.unassign_vif_chanctx = wlcore_op_unassign_vif_chanctx,
 	.switch_vif_chanctx = wlcore_op_switch_vif_chanctx,
-	.link_sta_rc_update = wlcore_op_sta_rc_update,
+	.sta_rc_update = wlcore_op_sta_rc_update,
 	.sta_statistics = wlcore_op_sta_statistics,
 	.get_expected_throughput = wlcore_op_get_expected_throughput,
 	CFG80211_TESTMODE_CMD(wl1271_tm_cmd)
@@ -6184,7 +6096,7 @@ static int wl1271_register_hw(struct wl1271 *wl)
 			wl1271_warning("Fuse mac address is zero. using random mac");
 			/* Use TI oui and a random nic */
 			oui_addr = WLCORE_TI_OUI_ADDRESS;
-			nic_addr = get_random_u32();
+			nic_addr = get_random_int();
 		} else {
 			oui_addr = wl->fuse_oui_addr;
 			/* fuse has the BD_ADDR, the WLAN addresses are the next two */
@@ -6820,7 +6732,7 @@ int wlcore_probe(struct wl1271 *wl, struct platform_device *pdev)
 }
 EXPORT_SYMBOL_GPL(wlcore_probe);
 
-void wlcore_remove(struct platform_device *pdev)
+int wlcore_remove(struct platform_device *pdev)
 {
 	struct wlcore_platdev_data *pdev_data = dev_get_platdata(&pdev->dev);
 	struct wl1271 *wl = platform_get_drvdata(pdev);
@@ -6835,7 +6747,7 @@ void wlcore_remove(struct platform_device *pdev)
 	if (pdev_data->family && pdev_data->family->nvs_name)
 		wait_for_completion(&wl->nvs_loading_complete);
 	if (!wl->initialized)
-		return;
+		return 0;
 
 	if (wl->wakeirq >= 0) {
 		dev_pm_clear_wake_irq(wl->dev);
@@ -6855,6 +6767,8 @@ void wlcore_remove(struct platform_device *pdev)
 
 	free_irq(wl->irq, wl);
 	wlcore_free_hw(wl);
+
+	return 0;
 }
 EXPORT_SYMBOL_GPL(wlcore_remove);
 
@@ -6876,7 +6790,6 @@ MODULE_PARM_DESC(bug_on_recovery, "BUG() on fw recovery");
 module_param(no_recovery, int, 0600);
 MODULE_PARM_DESC(no_recovery, "Prevent HW recovery. FW will remain stuck.");
 
-MODULE_DESCRIPTION("TI WLAN core driver");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Luciano Coelho <coelho@ti.com>");
 MODULE_AUTHOR("Juuso Oikarinen <juuso.oikarinen@nokia.com>");

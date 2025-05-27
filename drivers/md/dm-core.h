@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Internal header file _only_ for device mapper core
  *
@@ -22,10 +21,6 @@
 #include "dm-ima.h"
 
 #define DM_RESERVED_MAX_IOS		1024
-#define DM_MAX_TARGETS			1048576
-#define DM_MAX_TARGET_PARAMS		1024
-
-struct dm_io;
 
 struct dm_kobject_holder {
 	struct kobject kobj;
@@ -96,14 +91,6 @@ struct mapped_device {
 	spinlock_t deferred_lock;
 	struct bio_list deferred;
 
-	/*
-	 * requeue work context is needed for cloning one new bio
-	 * to represent the dm_io to be requeued, since each
-	 * dm_io may point to the original bio from FS.
-	 */
-	struct work_struct requeue_work;
-	struct dm_io *requeue_list;
-
 	void *interface_ptr;
 
 	/*
@@ -122,7 +109,7 @@ struct mapped_device {
 	struct dm_stats stats;
 
 	/* the number of internal suspends */
-	unsigned int internal_suspend_count;
+	unsigned internal_suspend_count;
 
 	int swap_bios;
 	struct semaphore swap_bios_semaphore;
@@ -140,7 +127,7 @@ struct mapped_device {
 
 #ifdef CONFIG_BLK_DEV_ZONED
 	unsigned int nr_zones;
-	void *zone_revalidate_map;
+	unsigned int *zwp_offset;
 #endif
 
 #ifdef CONFIG_IMA
@@ -206,21 +193,20 @@ struct dm_table {
 
 	bool integrity_supported:1;
 	bool singleton:1;
-	/* set if all the targets in the table have "flush_bypasses_map" set */
-	bool flush_bypasses_map:1;
+	unsigned integrity_added:1;
 
 	/*
-	 * Indicates the rw permissions for the new logical device.  This
-	 * should be a combination of BLK_OPEN_READ and BLK_OPEN_WRITE.
+	 * Indicates the rw permissions for the new logical
+	 * device.  This should be a combination of FMODE_READ
+	 * and FMODE_WRITE.
 	 */
-	blk_mode_t mode;
+	fmode_t mode;
 
 	/* a list of devices used by this table */
 	struct list_head devices;
-	struct rw_semaphore devices_lock;
 
 	/* events get handed up using this callback */
-	void (*event_fn)(void *data);
+	void (*event_fn)(void *);
 	void *event_context;
 
 	struct dm_md_mempools *mempools;
@@ -229,13 +215,6 @@ struct dm_table {
 	struct blk_crypto_profile *crypto_profile;
 #endif
 };
-
-static inline struct dm_target *dm_table_get_target(struct dm_table *t,
-						    unsigned int index)
-{
-	BUG_ON(index >= t->num_targets);
-	return t->targets + index;
-}
 
 /*
  * One of these is allocated per clone bio.
@@ -251,9 +230,6 @@ struct dm_target_io {
 	sector_t old_sector;
 	struct bio clone;
 };
-#define DM_TARGET_IO_BIO_OFFSET (offsetof(struct dm_target_io, clone))
-#define DM_IO_BIO_OFFSET \
-	(offsetof(struct dm_target_io, clone) + offsetof(struct dm_io, tio))
 
 /*
  * dm_target_io flags
@@ -296,6 +272,7 @@ struct dm_io {
 	atomic_t io_count;
 	struct mapped_device *md;
 
+	struct bio *split_bio;
 	/* The three fields represent mapped part of original bio */
 	struct bio *orig_bio;
 	unsigned int sector_offset; /* offset to end of orig_bio */
@@ -310,8 +287,7 @@ struct dm_io {
  */
 enum {
 	DM_IO_ACCOUNTED,
-	DM_IO_WAS_SPLIT,
-	DM_IO_BLK_STAT
+	DM_IO_WAS_SPLIT
 };
 
 static inline bool dm_io_flagged(struct dm_io *io, unsigned int bit)
@@ -324,16 +300,14 @@ static inline void dm_io_set_flag(struct dm_io *io, unsigned int bit)
 	io->flags |= (1U << bit);
 }
 
-void dm_io_rewind(struct dm_io *io, struct bio_set *bs);
-
 static inline struct completion *dm_get_completion_from_kobject(struct kobject *kobj)
 {
 	return &container_of(kobj, struct dm_kobject_holder, kobj)->completion;
 }
 
-unsigned int __dm_get_module_param(unsigned int *module_param, unsigned int def, unsigned int max);
+unsigned __dm_get_module_param(unsigned *module_param, unsigned def, unsigned max);
 
-static inline bool dm_message_test_buffer_overflow(char *result, unsigned int maxlen)
+static inline bool dm_message_test_buffer_overflow(char *result, unsigned maxlen)
 {
 	return !maxlen || strlen(result) + 1 >= maxlen;
 }

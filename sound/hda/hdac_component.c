@@ -5,7 +5,6 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/component.h>
-#include <linux/string_choices.h>
 #include <sound/core.h>
 #include <sound/hdaudio.h>
 #include <sound/hda_component.h>
@@ -43,7 +42,8 @@ int snd_hdac_set_codec_wakeup(struct hdac_bus *bus, bool enable)
 	if (!acomp->ops->codec_wake_override)
 		return 0;
 
-	dev_dbg(bus->dev, "%s codec wakeup\n", str_enable_disable(enable));
+	dev_dbg(bus->dev, "%s codec wakeup\n",
+		enable ? "enable" : "disable");
 
 	acomp->ops->codec_wake_override(acomp->dev, enable);
 
@@ -67,7 +67,8 @@ void snd_hdac_display_power(struct hdac_bus *bus, unsigned int idx, bool enable)
 {
 	struct drm_audio_component *acomp = bus->audio_component;
 
-	dev_dbg(bus->dev, "display power %s\n", str_enable_disable(enable));
+	dev_dbg(bus->dev, "display power %s\n",
+		enable ? "enable" : "disable");
 
 	mutex_lock(&bus->lock);
 	if (enable)

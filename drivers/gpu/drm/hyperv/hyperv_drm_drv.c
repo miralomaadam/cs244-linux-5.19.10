@@ -3,16 +3,15 @@
  * Copyright 2021 Microsoft
  */
 
-#include <linux/aperture.h>
 #include <linux/efi.h>
 #include <linux/hyperv.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 
-#include <drm/clients/drm_client_setup.h>
+#include <drm/drm_aperture.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_drv.h>
-#include <drm/drm_fbdev_shmem.h>
+#include <drm/drm_fb_helper.h>
 #include <drm/drm_gem_shmem_helper.h>
 #include <drm/drm_simple_kms_helper.h>
 
@@ -20,8 +19,12 @@
 
 #define DRIVER_NAME "hyperv_drm"
 #define DRIVER_DESC "DRM driver for Hyper-V synthetic video device"
+#define DRIVER_DATE "2020"
 #define DRIVER_MAJOR 1
 #define DRIVER_MINOR 0
+
+#define PCI_VENDOR_ID_MICROSOFT 0x1414
+#define PCI_DEVICE_ID_HYPERV_VIDEO 0x5353
 
 DEFINE_DRM_GEM_FOPS(hv_fops);
 
@@ -30,12 +33,12 @@ static struct drm_driver hyperv_driver = {
 
 	.name		 = DRIVER_NAME,
 	.desc		 = DRIVER_DESC,
+	.date		 = DRIVER_DATE,
 	.major		 = DRIVER_MAJOR,
 	.minor		 = DRIVER_MINOR,
 
 	.fops		 = &hv_fops,
 	DRM_GEM_SHMEM_DRIVER_OPS,
-	DRM_FBDEV_SHMEM_DRIVER_OPS,
 };
 
 static int hyperv_pci_probe(struct pci_dev *pdev,
@@ -66,11 +69,65 @@ static struct pci_driver hyperv_pci_driver = {
 	.remove =	hyperv_pci_remove,
 };
 
-static int hyperv_setup_vram(struct hyperv_drm_device *hv,
+static int hyperv_setup_gen1(struct hyperv_drm_device *hv)
+{
+	struct drm_device *dev = &hv->dev;
+	struct pci_dev *pdev;
+	int ret;
+
+	pdev = pci_get_device(PCI_VENDOR_ID_MICROSOFT,
+			      PCI_DEVICE_ID_HYPERV_VIDEO, NULL);
+	if (!pdev) {
+		drm_err(dev, "Unable to find PCI Hyper-V video\n");
+		return -ENODEV;
+	}
+
+	ret = drm_aperture_remove_conflicting_pci_framebuffers(pdev, &hyperv_driver);
+	if (ret) {
+		drm_err(dev, "Not able to remove boot fb\n");
+		return ret;
+	}
+
+	if (pci_request_region(pdev, 0, DRIVER_NAME) != 0)
+		drm_warn(dev, "Cannot request framebuffer, boot fb still active?\n");
+
+	if ((pdev->resource[0].flags & IORESOURCE_MEM) == 0) {
+		drm_err(dev, "Resource at bar 0 is not IORESOURCE_MEM\n");
+		ret = -ENODEV;
+		goto error;
+	}
+
+	hv->fb_base = pci_resource_start(pdev, 0);
+	hv->fb_size = pci_resource_len(pdev, 0);
+	if (!hv->fb_base) {
+		drm_err(dev, "Resource not available\n");
+		ret = -ENODEV;
+		goto error;
+	}
+
+	hv->fb_size = min(hv->fb_size,
+			  (unsigned long)(hv->mmio_megabytes * 1024 * 1024));
+	hv->vram = devm_ioremap(&pdev->dev, hv->fb_base, hv->fb_size);
+	if (!hv->vram) {
+		drm_err(dev, "Failed to map vram\n");
+		ret = -ENOMEM;
+	}
+
+error:
+	pci_dev_put(pdev);
+	return ret;
+}
+
+static int hyperv_setup_gen2(struct hyperv_drm_device *hv,
 			     struct hv_device *hdev)
 {
 	struct drm_device *dev = &hv->dev;
 	int ret;
+
+	drm_aperture_remove_conflicting_framebuffers(screen_info.lfb_base,
+						     screen_info.lfb_size,
+						     false,
+						     &hyperv_driver);
 
 	hv->fb_size = (unsigned long)hv->mmio_megabytes * 1024 * 1024;
 
@@ -124,9 +181,11 @@ static int hyperv_vmbus_probe(struct hv_device *hdev,
 		goto err_hv_set_drv_data;
 	}
 
-	aperture_remove_all_conflicting_devices(hyperv_driver.name);
+	if (efi_enabled(EFI_BOOT))
+		ret = hyperv_setup_gen2(hv, hdev);
+	else
+		ret = hyperv_setup_gen1(hv);
 
-	ret = hyperv_setup_vram(hv, hdev);
 	if (ret)
 		goto err_vmbus_close;
 
@@ -139,23 +198,22 @@ static int hyperv_vmbus_probe(struct hv_device *hdev,
 	if (ret)
 		drm_warn(dev, "Failed to update vram location.\n");
 
+	hv->dirt_needed = true;
+
 	ret = hyperv_mode_config_init(hv);
 	if (ret)
-		goto err_free_mmio;
+		goto err_vmbus_close;
 
 	ret = drm_dev_register(dev, 0);
 	if (ret) {
 		drm_err(dev, "Failed to register drm driver.\n");
-		goto err_free_mmio;
+		goto err_vmbus_close;
 	}
 
-	drm_client_setup(dev, NULL);
+	drm_fbdev_generic_setup(dev, 0);
 
 	return 0;
 
-err_free_mmio:
-	iounmap(hv->vram);
-	vmbus_free_mmio(hv->mem->start, hv->fb_size);
 err_vmbus_close:
 	vmbus_close(hdev->channel);
 err_hv_set_drv_data:
@@ -163,23 +221,35 @@ err_hv_set_drv_data:
 	return ret;
 }
 
-static void hyperv_vmbus_remove(struct hv_device *hdev)
+static int hyperv_vmbus_remove(struct hv_device *hdev)
 {
 	struct drm_device *dev = hv_get_drvdata(hdev);
 	struct hyperv_drm_device *hv = to_hv(dev);
+	struct pci_dev *pdev;
 
 	drm_dev_unplug(dev);
 	drm_atomic_helper_shutdown(dev);
 	vmbus_close(hdev->channel);
 	hv_set_drvdata(hdev, NULL);
 
-	iounmap(hv->vram);
-	vmbus_free_mmio(hv->mem->start, hv->fb_size);
-}
+	/*
+	 * Free allocated MMIO memory only on Gen2 VMs.
+	 * On Gen1 VMs, release the PCI device
+	 */
+	if (efi_enabled(EFI_BOOT)) {
+		vmbus_free_mmio(hv->mem->start, hv->fb_size);
+	} else {
+		pdev = pci_get_device(PCI_VENDOR_ID_MICROSOFT,
+				      PCI_DEVICE_ID_HYPERV_VIDEO, NULL);
+		if (!pdev) {
+			drm_err(dev, "Unable to find PCI Hyper-V video\n");
+			return -ENODEV;
+		}
+		pci_release_region(pdev, 0);
+		pci_dev_put(pdev);
+	}
 
-static void hyperv_vmbus_shutdown(struct hv_device *hdev)
-{
-	drm_atomic_helper_shutdown(hv_get_drvdata(hdev));
+	return 0;
 }
 
 static int hyperv_vmbus_suspend(struct hv_device *hdev)
@@ -224,7 +294,6 @@ static struct hv_driver hyperv_hv_driver = {
 	.id_table = hyperv_vmbus_tbl,
 	.probe = hyperv_vmbus_probe,
 	.remove = hyperv_vmbus_remove,
-	.shutdown = hyperv_vmbus_shutdown,
 	.suspend = hyperv_vmbus_suspend,
 	.resume = hyperv_vmbus_resume,
 	.driver = {

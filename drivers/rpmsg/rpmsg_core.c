@@ -20,9 +20,7 @@
 
 #include "rpmsg_internal.h"
 
-const struct class rpmsg_class = {
-	.name = "rpmsg",
-};
+struct class *rpmsg_class;
 EXPORT_SYMBOL(rpmsg_class);
 
 /**
@@ -333,25 +331,6 @@ int rpmsg_trysend_offchannel(struct rpmsg_endpoint *ept, u32 src, u32 dst,
 EXPORT_SYMBOL(rpmsg_trysend_offchannel);
 
 /**
- * rpmsg_set_flow_control() - request remote to pause/resume transmission
- * @ept:	the rpmsg endpoint
- * @pause:	pause transmission
- * @dst:	destination address of the endpoint
- *
- * Return: 0 on success and an appropriate error value on failure.
- */
-int rpmsg_set_flow_control(struct rpmsg_endpoint *ept, bool pause, u32 dst)
-{
-	if (WARN_ON(!ept))
-		return -EINVAL;
-	if (!ept->ops->set_flow_control)
-		return -EOPNOTSUPP;
-
-	return ept->ops->set_flow_control(ept, pause, dst);
-}
-EXPORT_SYMBOL_GPL(rpmsg_set_flow_control);
-
-/**
  * rpmsg_get_mtu() - get maximum transmission buffer size for sending message.
  * @ept: the rpmsg endpoint
  *
@@ -377,9 +356,9 @@ EXPORT_SYMBOL(rpmsg_get_mtu);
  * this is used to make sure we're not creating rpmsg devices for channels
  * that already exist.
  */
-static int rpmsg_device_match(struct device *dev, const void *data)
+static int rpmsg_device_match(struct device *dev, void *data)
 {
-	const struct rpmsg_channel_info *chinfo = data;
+	struct rpmsg_channel_info *chinfo = data;
 	struct rpmsg_device *rpdev = to_rpmsg_device(dev);
 
 	if (chinfo->src != RPMSG_ADDR_ANY && chinfo->src != rpdev->src)
@@ -493,10 +472,10 @@ static inline int rpmsg_id_match(const struct rpmsg_device *rpdev,
 }
 
 /* match rpmsg channel and rpmsg driver */
-static int rpmsg_dev_match(struct device *dev, const struct device_driver *drv)
+static int rpmsg_dev_match(struct device *dev, struct device_driver *drv)
 {
 	struct rpmsg_device *rpdev = to_rpmsg_device(dev);
-	const struct rpmsg_driver *rpdrv = to_rpmsg_driver(drv);
+	struct rpmsg_driver *rpdrv = to_rpmsg_driver(drv);
 	const struct rpmsg_device_id *ids = rpdrv->id_table;
 	unsigned int i;
 
@@ -513,9 +492,9 @@ static int rpmsg_dev_match(struct device *dev, const struct device_driver *drv)
 	return of_driver_match_device(dev, drv);
 }
 
-static int rpmsg_uevent(const struct device *dev, struct kobj_uevent_env *env)
+static int rpmsg_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
-	const struct rpmsg_device *rpdev = to_rpmsg_device(dev);
+	struct rpmsg_device *rpdev = to_rpmsg_device(dev);
 	int ret;
 
 	ret = of_device_uevent_modalias(dev, env);
@@ -547,7 +526,7 @@ static int rpmsg_dev_probe(struct device *dev)
 		goto out;
 
 	if (rpdrv->callback) {
-		strscpy(chinfo.name, rpdev->id.name, sizeof(chinfo.name));
+		strncpy(chinfo.name, rpdev->id.name, RPMSG_NAME_SIZE);
 		chinfo.src = rpdev->src;
 		chinfo.dst = RPMSG_ADDR_ANY;
 
@@ -560,8 +539,6 @@ static int rpmsg_dev_probe(struct device *dev)
 
 		rpdev->ept = ept;
 		rpdev->src = ept->addr;
-
-		ept->flow_cb = rpdrv->flowcontrol;
 	}
 
 	err = rpdrv->probe(rpdev);
@@ -607,7 +584,7 @@ static void rpmsg_dev_remove(struct device *dev)
 		rpmsg_destroy_ept(rpdev->ept);
 }
 
-static const struct bus_type rpmsg_bus = {
+static struct bus_type rpmsg_bus = {
 	.name		= "rpmsg",
 	.match		= rpmsg_dev_match,
 	.dev_groups	= rpmsg_dev_groups,
@@ -627,7 +604,7 @@ int rpmsg_register_device_override(struct rpmsg_device *rpdev,
 	int ret;
 
 	if (driver_override)
-		strscpy_pad(rpdev->id.name, driver_override, RPMSG_NAME_SIZE);
+		strcpy(rpdev->id.name, driver_override);
 
 	dev_set_name(dev, "%s.%s.%d.%d", dev_name(dev->parent),
 		     rpdev->id.name, rpdev->src, rpdev->dst);
@@ -717,16 +694,16 @@ static int __init rpmsg_init(void)
 {
 	int ret;
 
-	ret = class_register(&rpmsg_class);
-	if (ret) {
-		pr_err("failed to register rpmsg class\n");
-		return ret;
+	rpmsg_class = class_create(THIS_MODULE, "rpmsg");
+	if (IS_ERR(rpmsg_class)) {
+		pr_err("failed to create rpmsg class\n");
+		return PTR_ERR(rpmsg_class);
 	}
 
 	ret = bus_register(&rpmsg_bus);
 	if (ret) {
 		pr_err("failed to register rpmsg bus: %d\n", ret);
-		class_destroy(&rpmsg_class);
+		class_destroy(rpmsg_class);
 	}
 	return ret;
 }
@@ -735,7 +712,7 @@ postcore_initcall(rpmsg_init);
 static void __exit rpmsg_fini(void)
 {
 	bus_unregister(&rpmsg_bus);
-	class_destroy(&rpmsg_class);
+	class_destroy(rpmsg_class);
 }
 module_exit(rpmsg_fini);
 

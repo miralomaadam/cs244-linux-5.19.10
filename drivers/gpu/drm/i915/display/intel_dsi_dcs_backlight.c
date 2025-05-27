@@ -53,7 +53,7 @@ static u32 dcs_get_backlight(struct intel_connector *connector, enum pipe unused
 	enum port port;
 	size_t len = panel->backlight.max > U8_MAX ? 2 : 1;
 
-	for_each_dsi_port(port, panel->vbt.dsi.bl_ports) {
+	for_each_dsi_port(port, intel_dsi->dcs_backlight_ports) {
 		dsi_device = intel_dsi->dsi_hosts[port]->device;
 		mipi_dsi_dcs_read(dsi_device, MIPI_DCS_GET_DISPLAY_BRIGHTNESS,
 				  &data, len);
@@ -80,7 +80,7 @@ static void dcs_set_backlight(const struct drm_connector_state *conn_state, u32 
 		data[1] = level;
 	}
 
-	for_each_dsi_port(port, panel->vbt.dsi.bl_ports) {
+	for_each_dsi_port(port, intel_dsi->dcs_backlight_ports) {
 		dsi_device = intel_dsi->dsi_hosts[port]->device;
 		mode_flags = dsi_device->mode_flags;
 		dsi_device->mode_flags &= ~MIPI_DSI_MODE_LPM;
@@ -93,13 +93,12 @@ static void dcs_set_backlight(const struct drm_connector_state *conn_state, u32 
 static void dcs_disable_backlight(const struct drm_connector_state *conn_state, u32 level)
 {
 	struct intel_dsi *intel_dsi = enc_to_intel_dsi(to_intel_encoder(conn_state->best_encoder));
-	struct intel_panel *panel = &to_intel_connector(conn_state->connector)->panel;
 	struct mipi_dsi_device *dsi_device;
 	enum port port;
 
 	dcs_set_backlight(conn_state, 0);
 
-	for_each_dsi_port(port, panel->vbt.dsi.cabc_ports) {
+	for_each_dsi_port(port, intel_dsi->dcs_cabc_ports) {
 		u8 cabc = POWER_SAVE_OFF;
 
 		dsi_device = intel_dsi->dsi_hosts[port]->device;
@@ -107,7 +106,7 @@ static void dcs_disable_backlight(const struct drm_connector_state *conn_state, 
 				   &cabc, sizeof(cabc));
 	}
 
-	for_each_dsi_port(port, panel->vbt.dsi.bl_ports) {
+	for_each_dsi_port(port, intel_dsi->dcs_backlight_ports) {
 		u8 ctrl = 0;
 
 		dsi_device = intel_dsi->dsi_hosts[port]->device;
@@ -128,11 +127,10 @@ static void dcs_enable_backlight(const struct intel_crtc_state *crtc_state,
 				 const struct drm_connector_state *conn_state, u32 level)
 {
 	struct intel_dsi *intel_dsi = enc_to_intel_dsi(to_intel_encoder(conn_state->best_encoder));
-	struct intel_panel *panel = &to_intel_connector(conn_state->connector)->panel;
 	struct mipi_dsi_device *dsi_device;
 	enum port port;
 
-	for_each_dsi_port(port, panel->vbt.dsi.bl_ports) {
+	for_each_dsi_port(port, intel_dsi->dcs_backlight_ports) {
 		u8 ctrl = 0;
 
 		dsi_device = intel_dsi->dsi_hosts[port]->device;
@@ -148,7 +146,7 @@ static void dcs_enable_backlight(const struct intel_crtc_state *crtc_state,
 				   &ctrl, sizeof(ctrl));
 	}
 
-	for_each_dsi_port(port, panel->vbt.dsi.cabc_ports) {
+	for_each_dsi_port(port, intel_dsi->dcs_cabc_ports) {
 		u8 cabc = POWER_SAVE_MEDIUM;
 
 		dsi_device = intel_dsi->dsi_hosts[port]->device;
@@ -162,19 +160,16 @@ static void dcs_enable_backlight(const struct intel_crtc_state *crtc_state,
 static int dcs_setup_backlight(struct intel_connector *connector,
 			       enum pipe unused)
 {
-	struct drm_i915_private *i915 = to_i915(connector->base.dev);
+	struct drm_device *dev = connector->base.dev;
+	struct drm_i915_private *dev_priv = to_i915(dev);
 	struct intel_panel *panel = &connector->panel;
 
-	if (panel->vbt.backlight.brightness_precision_bits > 8)
-		panel->backlight.max = (1 << panel->vbt.backlight.brightness_precision_bits) - 1;
+	if (dev_priv->vbt.backlight.brightness_precision_bits > 8)
+		panel->backlight.max = (1 << dev_priv->vbt.backlight.brightness_precision_bits) - 1;
 	else
 		panel->backlight.max = PANEL_PWM_MAX_VALUE;
 
 	panel->backlight.level = panel->backlight.max;
-
-	drm_dbg_kms(&i915->drm,
-		    "[CONNECTOR:%d:%s] Using DCS for backlight control\n",
-		    connector->base.base.id, connector->base.name);
 
 	return 0;
 }
@@ -190,10 +185,11 @@ static const struct intel_panel_bl_funcs dcs_bl_funcs = {
 int intel_dsi_dcs_init_backlight_funcs(struct intel_connector *intel_connector)
 {
 	struct drm_device *dev = intel_connector->base.dev;
+	struct drm_i915_private *dev_priv = to_i915(dev);
 	struct intel_encoder *encoder = intel_attached_encoder(intel_connector);
 	struct intel_panel *panel = &intel_connector->panel;
 
-	if (panel->vbt.backlight.type != INTEL_BACKLIGHT_DSI_DCS)
+	if (dev_priv->vbt.backlight.type != INTEL_BACKLIGHT_DSI_DCS)
 		return -ENODEV;
 
 	if (drm_WARN_ON(dev, encoder->type != INTEL_OUTPUT_DSI))

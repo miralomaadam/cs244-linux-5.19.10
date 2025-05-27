@@ -13,10 +13,8 @@
 #include <linux/net.h>
 #include <linux/rcupdate.h>
 #include <linux/sched/signal.h>
-#include <linux/splice.h>
 
 #include <net/sock.h>
-#include <trace/events/sock.h>
 
 #include "smc.h"
 #include "smc_core.h"
@@ -33,8 +31,6 @@ static void smc_rx_wake_up(struct sock *sk)
 {
 	struct socket_wq *wq;
 
-	trace_sk_data_ready(sk);
-
 	/* derived from sock_def_readable() */
 	/* called already in smc_listen_work() */
 	rcu_read_lock();
@@ -42,10 +38,10 @@ static void smc_rx_wake_up(struct sock *sk)
 	if (skwq_has_sleeper(wq))
 		wake_up_interruptible_sync_poll(&wq->wait, EPOLLIN | EPOLLPRI |
 						EPOLLRDNORM | EPOLLRDBAND);
-	sk_wake_async_rcu(sk, SOCK_WAKE_WAITD, POLL_IN);
+	sk_wake_async(sk, SOCK_WAKE_WAITD, POLL_IN);
 	if ((sk->sk_shutdown == SHUTDOWN_MASK) ||
 	    (sk->sk_state == SMC_CLOSED))
-		sk_wake_async_rcu(sk, SOCK_WAKE_WAITD, POLL_HUP);
+		sk_wake_async(sk, SOCK_WAKE_WAITD, POLL_HUP);
 	rcu_read_unlock();
 }
 
@@ -149,112 +145,53 @@ static void smc_rx_spd_release(struct splice_pipe_desc *spd,
 static int smc_rx_splice(struct pipe_inode_info *pipe, char *src, size_t len,
 			 struct smc_sock *smc)
 {
-	struct smc_link_group *lgr = smc->conn.lgr;
-	int offset = offset_in_page(src);
-	struct partial_page *partial;
 	struct splice_pipe_desc spd;
-	struct smc_spd_priv **priv;
-	struct page **pages;
-	int bytes, nr_pages;
-	int i;
+	struct partial_page partial;
+	struct smc_spd_priv *priv;
+	int bytes;
 
-	nr_pages = !lgr->is_smcd && smc->conn.rmb_desc->is_vm ?
-		   PAGE_ALIGN(len + offset) / PAGE_SIZE : 1;
-
-	pages = kcalloc(nr_pages, sizeof(*pages), GFP_KERNEL);
-	if (!pages)
-		goto out;
-	partial = kcalloc(nr_pages, sizeof(*partial), GFP_KERNEL);
-	if (!partial)
-		goto out_page;
-	priv = kcalloc(nr_pages, sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
 	if (!priv)
-		goto out_part;
-	for (i = 0; i < nr_pages; i++) {
-		priv[i] = kzalloc(sizeof(**priv), GFP_KERNEL);
-		if (!priv[i])
-			goto out_priv;
-	}
+		return -ENOMEM;
+	priv->len = len;
+	priv->smc = smc;
+	partial.offset = src - (char *)smc->conn.rmb_desc->cpu_addr;
+	partial.len = len;
+	partial.private = (unsigned long)priv;
 
-	if (lgr->is_smcd ||
-	    (!lgr->is_smcd && !smc->conn.rmb_desc->is_vm)) {
-		/* smcd or smcr that uses physically contiguous RMBs */
-		priv[0]->len = len;
-		priv[0]->smc = smc;
-		partial[0].offset = src - (char *)smc->conn.rmb_desc->cpu_addr;
-		partial[0].len = len;
-		partial[0].private = (unsigned long)priv[0];
-		pages[0] = smc->conn.rmb_desc->pages;
-	} else {
-		int size, left = len;
-		void *buf = src;
-		/* smcr that uses virtually contiguous RMBs*/
-		for (i = 0; i < nr_pages; i++) {
-			size = min_t(int, PAGE_SIZE - offset, left);
-			priv[i]->len = size;
-			priv[i]->smc = smc;
-			pages[i] = vmalloc_to_page(buf);
-			partial[i].offset = offset;
-			partial[i].len = size;
-			partial[i].private = (unsigned long)priv[i];
-			buf += size;
-			left -= size;
-			offset = 0;
-		}
-	}
-	spd.nr_pages_max = nr_pages;
-	spd.nr_pages = nr_pages;
-	spd.pages = pages;
-	spd.partial = partial;
+	spd.nr_pages_max = 1;
+	spd.nr_pages = 1;
+	spd.pages = &smc->conn.rmb_desc->pages;
+	spd.partial = &partial;
 	spd.ops = &smc_pipe_ops;
 	spd.spd_release = smc_rx_spd_release;
 
 	bytes = splice_to_pipe(pipe, &spd);
 	if (bytes > 0) {
 		sock_hold(&smc->sk);
-		if (!lgr->is_smcd && smc->conn.rmb_desc->is_vm) {
-			for (i = 0; i < PAGE_ALIGN(bytes + offset) / PAGE_SIZE; i++)
-				get_page(pages[i]);
-		} else {
-			get_page(smc->conn.rmb_desc->pages);
-		}
+		get_page(smc->conn.rmb_desc->pages);
 		atomic_add(bytes, &smc->conn.splice_pending);
 	}
-	kfree(priv);
-	kfree(partial);
-	kfree(pages);
 
 	return bytes;
-
-out_priv:
-	for (i = (i - 1); i >= 0; i--)
-		kfree(priv[i]);
-	kfree(priv);
-out_part:
-	kfree(partial);
-out_page:
-	kfree(pages);
-out:
-	return -ENOMEM;
 }
 
-static int smc_rx_data_available_and_no_splice_pend(struct smc_connection *conn, size_t peeked)
+static int smc_rx_data_available_and_no_splice_pend(struct smc_connection *conn)
 {
-	return smc_rx_data_available(conn, peeked) &&
+	return atomic_read(&conn->bytes_to_rcv) &&
 	       !atomic_read(&conn->splice_pending);
 }
 
 /* blocks rcvbuf consumer until >=len bytes available or timeout or interrupted
  *   @smc    smc socket
  *   @timeo  pointer to max seconds to wait, pointer to value 0 for no timeout
- *   @peeked  number of bytes already peeked
  *   @fcrit  add'l criterion to evaluate as function pointer
  * Returns:
  * 1 if at least 1 byte available in rcvbuf or if socket error/shutdown.
  * 0 otherwise (nothing in rcvbuf nor timeout, e.g. interrupted).
  */
-int smc_rx_wait(struct smc_sock *smc, long *timeo, size_t peeked,
-		int (*fcrit)(struct smc_connection *conn, size_t baseline))
+int smc_rx_wait(struct smc_sock *smc, long *timeo,
+		int (*fcrit)(struct smc_connection *conn))
 {
 	DEFINE_WAIT_FUNC(wait, woken_wake_function);
 	struct smc_connection *conn = &smc->conn;
@@ -263,16 +200,16 @@ int smc_rx_wait(struct smc_sock *smc, long *timeo, size_t peeked,
 	struct sock *sk = &smc->sk;
 	int rc;
 
-	if (fcrit(conn, peeked))
+	if (fcrit(conn))
 		return 1;
 	sk_set_bit(SOCKWQ_ASYNC_WAITDATA, sk);
 	add_wait_queue(sk_sleep(sk), &wait);
 	rc = sk_wait_event(sk, timeo,
-			   READ_ONCE(sk->sk_err) ||
+			   sk->sk_err ||
 			   cflags->peer_conn_abort ||
-			   READ_ONCE(sk->sk_shutdown) & RCV_SHUTDOWN ||
+			   sk->sk_shutdown & RCV_SHUTDOWN ||
 			   conn->killed ||
-			   fcrit(conn, peeked),
+			   fcrit(conn),
 			   &wait);
 	remove_wait_queue(sk_sleep(sk), &wait);
 	sk_clear_bit(SOCKWQ_ASYNC_WAITDATA, sk);
@@ -323,11 +260,11 @@ static int smc_rx_recv_urg(struct smc_sock *smc, struct msghdr *msg, int len,
 	return -EAGAIN;
 }
 
-static bool smc_rx_recvmsg_data_available(struct smc_sock *smc, size_t peeked)
+static bool smc_rx_recvmsg_data_available(struct smc_sock *smc)
 {
 	struct smc_connection *conn = &smc->conn;
 
-	if (smc_rx_data_available(conn, peeked))
+	if (smc_rx_data_available(conn))
 		return true;
 	else if (conn->urg_state == SMC_URG_VALID)
 		/* we received a single urgent Byte - skip */
@@ -345,10 +282,10 @@ static bool smc_rx_recvmsg_data_available(struct smc_sock *smc, size_t peeked)
 int smc_rx_recvmsg(struct smc_sock *smc, struct msghdr *msg,
 		   struct pipe_inode_info *pipe, size_t len, int flags)
 {
-	size_t copylen, read_done = 0, read_remaining = len, peeked_bytes = 0;
+	size_t copylen, read_done = 0, read_remaining = len;
 	size_t chunk_len, chunk_off, chunk_len_sum;
 	struct smc_connection *conn = &smc->conn;
-	int (*func)(struct smc_connection *conn, size_t baseline);
+	int (*func)(struct smc_connection *conn);
 	union smc_host_cursor cons;
 	int readable, chunk;
 	char *rcvbuf_base;
@@ -385,14 +322,14 @@ int smc_rx_recvmsg(struct smc_sock *smc, struct msghdr *msg,
 		if (conn->killed)
 			break;
 
-		if (smc_rx_recvmsg_data_available(smc, peeked_bytes))
+		if (smc_rx_recvmsg_data_available(smc))
 			goto copy;
 
 		if (sk->sk_shutdown & RCV_SHUTDOWN) {
 			/* smc_cdc_msg_recv_action() could have run after
 			 * above smc_rx_recvmsg_data_available()
 			 */
-			if (smc_rx_recvmsg_data_available(smc, peeked_bytes))
+			if (smc_rx_recvmsg_data_available(smc))
 				goto copy;
 			break;
 		}
@@ -426,28 +363,26 @@ int smc_rx_recvmsg(struct smc_sock *smc, struct msghdr *msg,
 			}
 		}
 
-		if (!smc_rx_data_available(conn, peeked_bytes)) {
-			smc_rx_wait(smc, &timeo, peeked_bytes, smc_rx_data_available);
+		if (!smc_rx_data_available(conn)) {
+			smc_rx_wait(smc, &timeo, smc_rx_data_available);
 			continue;
 		}
 
 copy:
 		/* initialize variables for 1st iteration of subsequent loop */
 		/* could be just 1 byte, even after waiting on data above */
-		readable = smc_rx_data_available(conn, peeked_bytes);
+		readable = atomic_read(&conn->bytes_to_rcv);
 		splbytes = atomic_read(&conn->splice_pending);
 		if (!readable || (msg && splbytes)) {
 			if (splbytes)
 				func = smc_rx_data_available_and_no_splice_pend;
 			else
 				func = smc_rx_data_available;
-			smc_rx_wait(smc, &timeo, peeked_bytes, func);
+			smc_rx_wait(smc, &timeo, func);
 			continue;
 		}
 
 		smc_curs_copy(&cons, &conn->local_tx_ctrl.cons, conn);
-		if ((flags & MSG_PEEK) && peeked_bytes)
-			smc_curs_add(conn->rmb_desc->len, &cons, peeked_bytes);
 		/* subsequent splice() calls pick up where previous left */
 		if (splbytes)
 			smc_curs_add(conn->rmb_desc->len, &cons, splbytes);
@@ -478,13 +413,12 @@ copy:
 				if (rc < 0) {
 					if (!read_done)
 						read_done = -EFAULT;
+					smc_rmb_sync_sg_for_device(conn);
 					goto out;
 				}
 			}
 			read_remaining -= chunk_len;
 			read_done += chunk_len;
-			if (flags & MSG_PEEK)
-				peeked_bytes += chunk_len;
 
 			if (chunk_len_sum == copylen)
 				break; /* either on 1st or 2nd iteration */
@@ -493,6 +427,7 @@ copy:
 			chunk_len_sum += chunk_len;
 			chunk_off = 0; /* modulo offset in recv ring buffer */
 		}
+		smc_rmb_sync_sg_for_device(conn);
 
 		/* update cursors */
 		if (!(flags & MSG_PEEK)) {

@@ -6,8 +6,6 @@
 #include "target.h"
 
 struct evlist;
-struct hashamp;
-struct stats;
 
 struct perf_ftrace {
 	struct evlist		*evlist;
@@ -17,15 +15,9 @@ struct perf_ftrace {
 	struct list_head	notrace;
 	struct list_head	graph_funcs;
 	struct list_head	nograph_funcs;
-	struct hashmap		*profile_hash;
 	unsigned long		percpu_buffer_size;
 	bool			inherit;
 	bool			use_nsec;
-	unsigned int		bucket_range;
-	unsigned int		min_latency;
-	unsigned int		max_latency;
-	unsigned int		bucket_num;
-	bool			hide_empty;
 	int			graph_depth;
 	int			func_stack_trace;
 	int			func_irq_info;
@@ -33,7 +25,7 @@ struct perf_ftrace {
 	int			graph_noirqs;
 	int			graph_verbose;
 	int			graph_thresh;
-	int			graph_tail;
+	unsigned int		initial_delay;
 };
 
 struct filter_entry {
@@ -49,7 +41,7 @@ int perf_ftrace__latency_prepare_bpf(struct perf_ftrace *ftrace);
 int perf_ftrace__latency_start_bpf(struct perf_ftrace *ftrace);
 int perf_ftrace__latency_stop_bpf(struct perf_ftrace *ftrace);
 int perf_ftrace__latency_read_bpf(struct perf_ftrace *ftrace,
-				  int buckets[], struct stats *stats);
+				  int buckets[]);
 int perf_ftrace__latency_cleanup_bpf(struct perf_ftrace *ftrace);
 
 #else  /* !HAVE_BPF_SKEL */
@@ -74,8 +66,7 @@ perf_ftrace__latency_stop_bpf(struct perf_ftrace *ftrace __maybe_unused)
 
 static inline int
 perf_ftrace__latency_read_bpf(struct perf_ftrace *ftrace __maybe_unused,
-			      int buckets[] __maybe_unused,
-			      struct stats *stats __maybe_unused)
+			      int buckets[] __maybe_unused)
 {
 	return -1;
 }

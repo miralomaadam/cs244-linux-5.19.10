@@ -11,6 +11,7 @@
 
 #include "net_driver.h"
 #include <linux/module.h>
+#include <linux/aer.h>
 #include "efx_common.h"
 #include "efx_channels.h"
 #include "io.h"
@@ -422,59 +423,65 @@ static int ef100_pci_find_func_ctrl_window(struct efx_nic *efx,
  */
 static void ef100_pci_remove(struct pci_dev *pci_dev)
 {
-	struct efx_nic *efx = pci_get_drvdata(pci_dev);
-	struct efx_probe_data *probe_data;
+	struct efx_nic *efx;
 
+	efx = pci_get_drvdata(pci_dev);
 	if (!efx)
 		return;
 
-	probe_data = container_of(efx, struct efx_probe_data, efx);
-	ef100_remove_netdev(probe_data);
-#ifdef CONFIG_SFC_SRIOV
-	efx_fini_struct_tc(efx);
-#endif
+	rtnl_lock();
+	dev_close(efx->net_dev);
+	rtnl_unlock();
 
+	/* Unregistering our netdev notifier triggers unbinding of TC indirect
+	 * blocks, so we have to do it before PCI removal.
+	 */
+	unregister_netdevice_notifier(&efx->netdev_notifier);
+#if defined(CONFIG_SFC_SRIOV)
+	if (!efx->type->is_vf)
+		efx_ef100_pci_sriov_disable(efx);
+#endif
 	ef100_remove(efx);
 	efx_fini_io(efx);
-
-	pci_dbg(pci_dev, "shutdown successful\n");
+	netif_dbg(efx, drv, efx->net_dev, "shutdown successful\n");
 
 	pci_set_drvdata(pci_dev, NULL);
 	efx_fini_struct(efx);
-	kfree(probe_data);
+	free_netdev(efx->net_dev);
+
+	pci_disable_pcie_error_reporting(pci_dev);
 };
 
 static int ef100_pci_probe(struct pci_dev *pci_dev,
 			   const struct pci_device_id *entry)
 {
 	struct ef100_func_ctl_window fcw = { 0 };
-	struct efx_probe_data *probe_data;
+	struct net_device *net_dev;
 	struct efx_nic *efx;
 	int rc;
 
-	/* Allocate probe data and struct efx_nic */
-	probe_data = kzalloc(sizeof(*probe_data), GFP_KERNEL);
-	if (!probe_data)
+	/* Allocate and initialise a struct net_device and struct efx_nic */
+	net_dev = alloc_etherdev_mq(sizeof(*efx), EFX_MAX_CORE_TX_QUEUES);
+	if (!net_dev)
 		return -ENOMEM;
-	probe_data->pci_dev = pci_dev;
-	efx = &probe_data->efx;
-
+	efx = netdev_priv(net_dev);
 	efx->type = (const struct efx_nic_type *)entry->driver_data;
 
-	efx->pci_dev = pci_dev;
 	pci_set_drvdata(pci_dev, efx);
-	rc = efx_init_struct(efx, pci_dev);
+	SET_NETDEV_DEV(net_dev, &pci_dev->dev);
+	rc = efx_init_struct(efx, pci_dev, net_dev);
 	if (rc)
 		goto fail;
 
 	efx->vi_stride = EF100_DEFAULT_VI_STRIDE;
-	pci_info(pci_dev, "Solarflare EF100 NIC detected\n");
+	netif_info(efx, probe, efx->net_dev,
+		   "Solarflare EF100 NIC detected\n");
 
 	rc = ef100_pci_find_func_ctrl_window(efx, &fcw);
 	if (rc) {
-		pci_err(pci_dev,
-			"Error looking for ef100 function control window, rc=%d\n",
-			rc);
+		netif_err(efx, probe, efx->net_dev,
+			  "Error looking for ef100 function control window, rc=%d\n",
+			  rc);
 		goto fail;
 	}
 
@@ -486,7 +493,8 @@ static int ef100_pci_probe(struct pci_dev *pci_dev,
 	}
 
 	if (fcw.offset > pci_resource_len(efx->pci_dev, fcw.bar) - ESE_GZ_FCW_LEN) {
-		pci_err(pci_dev, "Func control window overruns BAR\n");
+		netif_err(efx, probe, efx->net_dev,
+			  "Func control window overruns BAR\n");
 		rc = -EIO;
 		goto fail;
 	}
@@ -500,16 +508,19 @@ static int ef100_pci_probe(struct pci_dev *pci_dev,
 
 	efx->reg_base = fcw.offset;
 
+	efx->netdev_notifier.notifier_call = ef100_netdev_event;
+	rc = register_netdevice_notifier(&efx->netdev_notifier);
+	if (rc) {
+		netif_err(efx, probe, efx->net_dev,
+			  "Failed to register netdevice notifier, rc=%d\n", rc);
+		goto fail;
+	}
+
 	rc = efx->type->probe(efx);
 	if (rc)
 		goto fail;
 
-	efx->state = STATE_PROBED;
-	rc = ef100_probe_netdev(probe_data);
-	if (rc)
-		goto fail;
-
-	pci_dbg(pci_dev, "initialisation successful\n");
+	netif_dbg(efx, probe, efx->net_dev, "initialisation successful\n");
 
 	return 0;
 

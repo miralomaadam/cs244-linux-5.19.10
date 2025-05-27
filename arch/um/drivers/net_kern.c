@@ -204,7 +204,7 @@ static int uml_net_close(struct net_device *dev)
 	return 0;
 }
 
-static netdev_tx_t uml_net_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static int uml_net_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct uml_net_private *lp = netdev_priv(dev);
 	unsigned long flags;
@@ -265,7 +265,7 @@ static void uml_net_poll_controller(struct net_device *dev)
 static void uml_net_get_drvinfo(struct net_device *dev,
 				struct ethtool_drvinfo *info)
 {
-	strscpy(info->driver, DRIVER_NAME);
+	strlcpy(info->driver, DRIVER_NAME, sizeof(info->driver));
 }
 
 static const struct ethtool_ops uml_net_ethtool_ops = {
@@ -336,7 +336,7 @@ static struct platform_driver uml_net_driver = {
 
 static void net_device_release(struct device *dev)
 {
-	struct uml_net *device = container_of(dev, struct uml_net, pdev.dev);
+	struct uml_net *device = dev_get_drvdata(dev);
 	struct net_device *netdev = device->dev;
 	struct uml_net_private *lp = netdev_priv(netdev);
 
@@ -636,7 +636,10 @@ static int __init eth_setup(char *str)
 		return 1;
 	}
 
-	new = memblock_alloc_or_panic(sizeof(*new), SMP_CACHE_BYTES);
+	new = memblock_alloc(sizeof(*new), SMP_CACHE_BYTES);
+	if (!new)
+		panic("%s: Failed to allocate %zu bytes\n", __func__,
+		      sizeof(*new));
 
 	INIT_LIST_HEAD(&new->list);
 	new->index = n;

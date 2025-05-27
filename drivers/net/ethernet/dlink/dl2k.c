@@ -352,7 +352,7 @@ parse_eeprom (struct net_device *dev)
 	eth_hw_addr_set(dev, psrom->mac_addr);
 
 	if (np->chip_id == CHIP_IP1000A) {
-		np->led_mode = le16_to_cpu(psrom->led_mode);
+		np->led_mode = psrom->led_mode;
 		return 0;
 	}
 
@@ -565,7 +565,8 @@ static void rio_hw_init(struct net_device *dev)
 	 * too. However, it doesn't work on IP1000A so we use 16-bit access.
 	 */
 	for (i = 0; i < 3; i++)
-		dw16(StationAddr0 + 2 * i, get_unaligned_le16(&dev->dev_addr[2 * i]));
+		dw16(StationAddr0 + 2 * i,
+		     cpu_to_le16(((const u16 *)dev->dev_addr)[i]));
 
 	set_multicast (dev);
 	if (np->coalesce) {
@@ -813,6 +814,7 @@ rio_free_tx (struct net_device *dev, int irq)
 {
 	struct netdev_private *np = netdev_priv(dev);
 	int entry = np->old_tx % TX_RING_SIZE;
+	int tx_use = 0;
 	unsigned long flag = 0;
 
 	if (irq)
@@ -837,6 +839,7 @@ rio_free_tx (struct net_device *dev, int irq)
 
 		np->tx_skbuff[entry] = NULL;
 		entry = (entry + 1) % TX_RING_SIZE;
+		tx_use++;
 	}
 	if (irq)
 		spin_unlock(&np->tx_lock);
@@ -1232,8 +1235,8 @@ static void rio_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *info
 {
 	struct netdev_private *np = netdev_priv(dev);
 
-	strscpy(info->driver, "dl2k", sizeof(info->driver));
-	strscpy(info->bus_info, pci_name(np->pdev), sizeof(info->bus_info));
+	strlcpy(info->driver, "dl2k", sizeof(info->driver));
+	strlcpy(info->bus_info, pci_name(np->pdev), sizeof(info->bus_info));
 }
 
 static int rio_get_link_ksettings(struct net_device *dev,
@@ -1778,7 +1781,7 @@ rio_close (struct net_device *dev)
 	rio_hw_stop(dev);
 
 	free_irq(pdev->irq, dev);
-	timer_delete_sync(&np->timer);
+	del_timer_sync (&np->timer);
 
 	free_list(dev);
 
@@ -1818,7 +1821,7 @@ static int rio_suspend(struct device *device)
 		return 0;
 
 	netif_device_detach(dev);
-	timer_delete_sync(&np->timer);
+	del_timer_sync(&np->timer);
 	rio_hw_stop(dev);
 
 	return 0;
@@ -1842,7 +1845,7 @@ static int rio_resume(struct device *device)
 	return 0;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(rio_pm_ops, rio_suspend, rio_resume);
+static SIMPLE_DEV_PM_OPS(rio_pm_ops, rio_suspend, rio_resume);
 #define RIO_PM_OPS    (&rio_pm_ops)
 
 #else

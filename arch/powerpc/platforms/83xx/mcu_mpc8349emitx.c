@@ -178,7 +178,7 @@ err:
 	return ret;
 }
 
-static void mcu_remove(struct i2c_client *client)
+static int mcu_remove(struct i2c_client *client)
 {
 	struct mcu *mcu = i2c_get_clientdata(client);
 
@@ -193,6 +193,7 @@ static void mcu_remove(struct i2c_client *client)
 
 	mcu_gpiochip_remove(mcu);
 	kfree(mcu);
+	return 0;
 }
 
 static const struct i2c_device_id mcu_ids[] = {
@@ -211,7 +212,7 @@ static struct i2c_driver mcu_driver = {
 		.name = "mcu-mpc8349emitx",
 		.of_match_table = mcu_of_match_table,
 	},
-	.probe = mcu_probe,
+	.probe_new = mcu_probe,
 	.remove	= mcu_remove,
 	.id_table = mcu_ids,
 };

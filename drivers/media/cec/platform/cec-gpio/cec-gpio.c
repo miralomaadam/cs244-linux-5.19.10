@@ -3,12 +3,11 @@
  * Copyright 2017 Cisco Systems, Inc. and/or its affiliates. All rights reserved.
  */
 
-#include <linux/delay.h>
-#include <linux/gpio/consumer.h>
-#include <linux/interrupt.h>
 #include <linux/module.h>
+#include <linux/interrupt.h>
+#include <linux/delay.h>
 #include <linux/platform_device.h>
-#include <linux/seq_file.h>
+#include <linux/gpio/consumer.h>
 #include <media/cec-notifier.h>
 #include <media/cec-pin.h>
 
@@ -160,6 +159,11 @@ static int cec_gpio_read_5v(struct cec_adapter *adap)
 	return gpiod_get_value(cec->v5_gpio);
 }
 
+static void cec_gpio_free(struct cec_adapter *adap)
+{
+	cec_gpio_disable_irq(adap);
+}
+
 static const struct cec_pin_ops cec_gpio_pin_ops = {
 	.read = cec_gpio_read,
 	.low = cec_gpio_low,
@@ -167,6 +171,7 @@ static const struct cec_pin_ops cec_gpio_pin_ops = {
 	.enable_irq = cec_gpio_enable_irq,
 	.disable_irq = cec_gpio_disable_irq,
 	.status = cec_gpio_status,
+	.free = cec_gpio_free,
 	.read_hpd = cec_gpio_read_hpd,
 	.read_5v = cec_gpio_read_5v,
 };
@@ -210,10 +215,12 @@ static int cec_gpio_probe(struct platform_device *pdev)
 		return PTR_ERR(cec->adap);
 
 	ret = devm_request_irq(dev, cec->cec_irq, cec_gpio_irq_handler,
-			       IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING | IRQF_NO_AUTOEN,
+			       IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
 			       cec->adap->name, cec);
 	if (ret)
 		goto del_adap;
+
+	cec_gpio_disable_irq(cec->adap);
 
 	if (cec->hpd_gpio) {
 		cec->hpd_irq = gpiod_to_irq(cec->hpd_gpio);
@@ -262,12 +269,13 @@ del_adap:
 	return ret;
 }
 
-static void cec_gpio_remove(struct platform_device *pdev)
+static int cec_gpio_remove(struct platform_device *pdev)
 {
 	struct cec_gpio *cec = platform_get_drvdata(pdev);
 
 	cec_notifier_cec_adap_unregister(cec->notifier, cec->adap);
 	cec_unregister_adapter(cec->adap);
+	return 0;
 }
 
 static const struct of_device_id cec_gpio_match[] = {
@@ -289,6 +297,6 @@ static struct platform_driver cec_gpio_pdrv = {
 
 module_platform_driver(cec_gpio_pdrv);
 
-MODULE_AUTHOR("Hans Verkuil <hansverk@cisco.com>");
+MODULE_AUTHOR("Hans Verkuil <hans.verkuil@cisco.com>");
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("CEC GPIO driver");

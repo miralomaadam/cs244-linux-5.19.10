@@ -314,7 +314,7 @@ static bool ip_can_use_hint(const struct sk_buff *skb, const struct iphdr *iph,
 
 int tcp_v4_early_demux(struct sk_buff *skb);
 int udp_v4_early_demux(struct sk_buff *skb);
-static int ip_rcv_finish_core(struct net *net,
+static int ip_rcv_finish_core(struct net *net, struct sock *sk,
 			      struct sk_buff *skb, struct net_device *dev,
 			      const struct sk_buff *hint)
 {
@@ -322,14 +322,15 @@ static int ip_rcv_finish_core(struct net *net,
 	int err, drop_reason;
 	struct rtable *rt;
 
+	drop_reason = SKB_DROP_REASON_NOT_SPECIFIED;
+
 	if (ip_can_use_hint(skb, iph, hint)) {
-		drop_reason = ip_route_use_hint(skb, iph->daddr, iph->saddr,
-						ip4h_dscp(iph), dev, hint);
-		if (unlikely(drop_reason))
+		err = ip_route_use_hint(skb, iph->daddr, iph->saddr, iph->tos,
+					dev, hint);
+		if (unlikely(err))
 			goto drop_error;
 	}
 
-	drop_reason = SKB_DROP_REASON_NOT_SPECIFIED;
 	if (READ_ONCE(net->ipv4.sysctl_ip_early_demux) &&
 	    !skb_dst(skb) &&
 	    !skb->sk &&
@@ -361,16 +362,10 @@ static int ip_rcv_finish_core(struct net *net,
 	 *	how the packet travels inside Linux networking.
 	 */
 	if (!skb_valid_dst(skb)) {
-		drop_reason = ip_route_input_noref(skb, iph->daddr, iph->saddr,
-						   ip4h_dscp(iph), dev);
-		if (unlikely(drop_reason))
+		err = ip_route_input_noref(skb, iph->daddr, iph->saddr,
+					   iph->tos, dev);
+		if (unlikely(err))
 			goto drop_error;
-		drop_reason = SKB_DROP_REASON_NOT_SPECIFIED;
-	} else {
-		struct in_device *in_dev = __in_dev_get_rcu(dev);
-
-		if (in_dev && IN_DEV_ORCONF(in_dev, NOPOLICY))
-			IPCB(skb)->flags |= IPSKB_NOPOLICY;
 	}
 
 #ifdef CONFIG_IP_ROUTE_CLASSID
@@ -425,8 +420,10 @@ drop:
 	return NET_RX_DROP;
 
 drop_error:
-	if (drop_reason == SKB_DROP_REASON_IP_RPFILTER)
+	if (err == -EXDEV) {
+		drop_reason = SKB_DROP_REASON_IP_RPFILTER;
 		__NET_INC_STATS(net, LINUX_MIB_IPRPFILTER);
+	}
 	goto drop;
 }
 
@@ -442,7 +439,7 @@ static int ip_rcv_finish(struct net *net, struct sock *sk, struct sk_buff *skb)
 	if (!skb)
 		return NET_RX_SUCCESS;
 
-	ret = ip_rcv_finish_core(net, skb, dev, NULL);
+	ret = ip_rcv_finish_core(net, sk, skb, dev, NULL);
 	if (ret != NET_RX_DROP)
 		ret = dst_input(skb);
 	return ret;
@@ -509,7 +506,7 @@ static struct sk_buff *ip_rcv_core(struct sk_buff *skb, struct net *net)
 	if (unlikely(ip_fast_csum((u8 *)iph, iph->ihl)))
 		goto csum_error;
 
-	len = iph_totlen(skb, iph);
+	len = ntohs(iph->tot_len);
 	if (skb->len < len) {
 		drop_reason = SKB_DROP_REASON_PKT_TOO_SMALL;
 		__IP_INC_STATS(net, IPSTATS_MIB_INTRUNCATEDPKTS);
@@ -582,19 +579,20 @@ static void ip_sublist_rcv_finish(struct list_head *head)
 static struct sk_buff *ip_extract_route_hint(const struct net *net,
 					     struct sk_buff *skb, int rt_type)
 {
-	if (fib4_has_custom_rules(net) || rt_type == RTN_BROADCAST ||
-	    IPCB(skb)->flags & IPSKB_MULTIPATH)
+	if (fib4_has_custom_rules(net) || rt_type == RTN_BROADCAST)
 		return NULL;
 
 	return skb;
 }
 
-static void ip_list_rcv_finish(struct net *net, struct list_head *head)
+static void ip_list_rcv_finish(struct net *net, struct sock *sk,
+			       struct list_head *head)
 {
 	struct sk_buff *skb, *next, *hint = NULL;
 	struct dst_entry *curr_dst = NULL;
-	LIST_HEAD(sublist);
+	struct list_head sublist;
 
+	INIT_LIST_HEAD(&sublist);
 	list_for_each_entry_safe(skb, next, head, list) {
 		struct net_device *dev = skb->dev;
 		struct dst_entry *dst;
@@ -606,13 +604,13 @@ static void ip_list_rcv_finish(struct net *net, struct list_head *head)
 		skb = l3mdev_ip_rcv(skb);
 		if (!skb)
 			continue;
-		if (ip_rcv_finish_core(net, skb, dev, hint) == NET_RX_DROP)
+		if (ip_rcv_finish_core(net, sk, skb, dev, hint) == NET_RX_DROP)
 			continue;
 
 		dst = skb_dst(skb);
 		if (curr_dst != dst) {
 			hint = ip_extract_route_hint(net, skb,
-						     dst_rtable(dst)->rt_type);
+					       ((struct rtable *)dst)->rt_type);
 
 			/* dispatch old sublist */
 			if (!list_empty(&sublist))
@@ -632,7 +630,7 @@ static void ip_sublist_rcv(struct list_head *head, struct net_device *dev,
 {
 	NF_HOOK_LIST(NFPROTO_IPV4, NF_INET_PRE_ROUTING, net, NULL,
 		     head, dev, NULL, ip_rcv_finish);
-	ip_list_rcv_finish(net, head);
+	ip_list_rcv_finish(net, NULL, head);
 }
 
 /* Receive a list of IP packets */
@@ -642,8 +640,9 @@ void ip_list_rcv(struct list_head *head, struct packet_type *pt,
 	struct net_device *curr_dev = NULL;
 	struct net *curr_net = NULL;
 	struct sk_buff *skb, *next;
-	LIST_HEAD(sublist);
+	struct list_head sublist;
 
+	INIT_LIST_HEAD(&sublist);
 	list_for_each_entry_safe(skb, next, head, list) {
 		struct net_device *dev = skb->dev;
 		struct net *net = dev_net(dev);

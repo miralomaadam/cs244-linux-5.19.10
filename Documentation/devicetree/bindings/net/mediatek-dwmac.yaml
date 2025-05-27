@@ -19,13 +19,12 @@ select:
       contains:
         enum:
           - mediatek,mt2712-gmac
-          - mediatek,mt8188-gmac
           - mediatek,mt8195-gmac
   required:
     - compatible
 
 allOf:
-  - $ref: snps,dwmac.yaml#
+  - $ref: "snps,dwmac.yaml#"
 
 properties:
   compatible:
@@ -37,11 +36,6 @@ properties:
       - items:
           - enum:
               - mediatek,mt8195-gmac
-          - const: snps,dwmac-5.10a
-      - items:
-          - enum:
-              - mediatek,mt8188-gmac
-          - const: mediatek,mt8195-gmac
           - const: snps,dwmac-5.10a
 
   clocks:
@@ -64,12 +58,6 @@ properties:
       - const: rmii_internal
       - const: mac_cg
 
-  interrupts:
-    maxItems: 1
-
-  interrupt-names:
-    const: macirq
-
   power-domains:
     maxItems: 1
 
@@ -86,7 +74,7 @@ properties:
       or will round down. Range 0~31*170.
       For MT2712 RMII/MII interface, Allowed value need to be a multiple of 550,
       or will round down. Range 0~31*550.
-      For MT8188/MT8195 RGMII/RMII/MII interface, Allowed value need to be a multiple of 290,
+      For MT8195 RGMII/RMII/MII interface, Allowed value need to be a multiple of 290,
       or will round down. Range 0~31*290.
 
   mediatek,rx-delay-ps:
@@ -96,7 +84,7 @@ properties:
       or will round down. Range 0~31*170.
       For MT2712 RMII/MII interface, Allowed value need to be a multiple of 550,
       or will round down. Range 0~31*550.
-      For MT8188/MT8195 RGMII/RMII/MII interface, Allowed value need to be a multiple
+      For MT8195 RGMII/RMII/MII interface, Allowed value need to be a multiple
       of 290, or will round down. Range 0~31*290.
 
   mediatek,rmii-rxc:
@@ -135,7 +123,7 @@ properties:
     type: boolean
     description:
       If present, indicates that MAC supports WOL(Wake-On-LAN), and MAC WOL will be enabled.
-      Otherwise, PHY WOL is preferred.
+      Otherwise, PHY WOL is perferred.
 
 required:
   - compatible
@@ -162,7 +150,7 @@ examples:
         reg = <0x1101c000 0x1300>;
         interrupts = <GIC_SPI 237 IRQ_TYPE_LEVEL_LOW>;
         interrupt-names = "macirq";
-        phy-mode = "rgmii-rxid";
+        phy-mode ="rgmii-rxid";
         mac-address = [00 55 7b b5 7d f7];
         clock-names = "axi",
                       "apb",

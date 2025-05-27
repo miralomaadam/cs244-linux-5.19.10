@@ -2,6 +2,15 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms and conditions of the GNU General Public License,
+ * version 2, as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ * more details.
  */
 
 #include "gdc_device.h"		/* gdc_lut_store(), ... */
@@ -89,27 +98,17 @@
 #include "sh_css_frac.h"
 #include "ia_css_bufq.h"
 
-static size_t fpntbl_bytes(const struct ia_css_binary *binary)
-{
-	return array3_size(sizeof(char),
-			   binary->in_frame_info.res.height,
-			   binary->in_frame_info.padded_width);
-}
+#define FPNTBL_BYTES(binary) \
+	(sizeof(char) * (binary)->in_frame_info.res.height * \
+	 (binary)->in_frame_info.padded_width)
 
-static size_t sctbl_bytes(const struct ia_css_binary *binary)
-{
-	return size_mul(sizeof(unsigned short),
-			array3_size(binary->sctbl_height,
-				    binary->sctbl_aligned_width_per_color,
-				    IA_CSS_SC_NUM_COLORS));
-}
+#define SCTBL_BYTES(binary) \
+	(sizeof(unsigned short) * (binary)->sctbl_height * \
+	 (binary)->sctbl_aligned_width_per_color * IA_CSS_SC_NUM_COLORS)
 
-static size_t morph_plane_bytes(const struct ia_css_binary *binary)
-{
-	return array3_size(SH_CSS_MORPH_TABLE_ELEM_BYTES,
-			   binary->morph_tbl_aligned_width,
-			   binary->morph_tbl_height);
-}
+#define MORPH_PLANE_BYTES(binary) \
+	(SH_CSS_MORPH_TABLE_ELEM_BYTES * (binary)->morph_tbl_aligned_width * \
+	 (binary)->morph_tbl_height)
 
 /* We keep a second copy of the ptr struct for the SP to access.
    Again, this would not be necessary on the chip. */
@@ -937,8 +936,8 @@ sh_css_set_black_frame(struct ia_css_stream *stream,
 	assert(raw_black_frame);
 
 	params = stream->isp_params_configs;
-	height = raw_black_frame->frame_info.res.height;
-	width = raw_black_frame->frame_info.padded_width;
+	height = raw_black_frame->info.res.height;
+	width = raw_black_frame->info.padded_width;
 
 	ptr = raw_black_frame->data
 	+ raw_black_frame->planes.raw.offset;
@@ -951,8 +950,8 @@ sh_css_set_black_frame(struct ia_css_stream *stream,
 		params->fpn_config.data = NULL;
 	}
 	if (!params->fpn_config.data) {
-		params->fpn_config.data = kvmalloc(array3_size(height, width, sizeof(short)),
-						   GFP_KERNEL);
+		params->fpn_config.data = kvmalloc(height * width *
+						   sizeof(short), GFP_KERNEL);
 		if (!params->fpn_config.data) {
 			IA_CSS_ERROR("out of memory");
 			IA_CSS_LEAVE_ERR_PRIVATE(-ENOMEM);
@@ -1188,15 +1187,16 @@ ia_css_process_zoom_and_motion(
 			const struct sh_css_binary_args *args = &stage->args;
 			const struct ia_css_frame_info *out_infos[IA_CSS_BINARY_MAX_OUTPUT_PORTS] = {NULL};
 
-			out_infos[0] = ia_css_frame_get_info(args->out_frame[0]);
-
+			if (args->out_frame[0])
+				out_infos[0] = &args->out_frame[0]->info;
 			info = &stage->firmware->info.isp;
 			ia_css_binary_fill_info(info, false, false,
 						ATOMISP_INPUT_FORMAT_RAW_10,
-						ia_css_frame_get_info(args->in_frame),
+						args->in_frame  ? &args->in_frame->info  : NULL,
 						NULL,
 						out_infos,
-						ia_css_frame_get_info(args->out_vf_frame),
+						args->out_vf_frame ? &args->out_vf_frame->info
+						: NULL,
 						&tmp_binary,
 						NULL,
 						-1, true);
@@ -2072,7 +2072,8 @@ static bool realloc_isp_css_mm_buf(
     size_t *curr_size,
     size_t needed_size,
     bool force,
-    int *err)
+    int *err,
+    uint16_t mmgr_attribute)
 {
 	s32 id;
 
@@ -2094,7 +2095,11 @@ static bool realloc_isp_css_mm_buf(
 
 	id = IA_CSS_REFCOUNT_PARAM_BUFFER;
 	ia_css_refcount_decrement(id, *curr_buf);
-	*curr_buf = ia_css_refcount_increment(id, hmm_alloc(needed_size));
+	*curr_buf = ia_css_refcount_increment(id, hmm_alloc(needed_size,
+							    HMM_BO_PRIVATE, 0,
+							    NULL,
+							    mmgr_attribute));
+
 	if (!*curr_buf) {
 		*err = -ENOMEM;
 		*curr_size = 0;
@@ -2117,7 +2122,7 @@ static bool reallocate_buffer(
 	IA_CSS_ENTER_PRIVATE("void");
 
 	ret = realloc_isp_css_mm_buf(curr_buf,
-				     curr_size, needed_size, force, err);
+				     curr_size, needed_size, force, err, 0);
 
 	IA_CSS_LEAVE_PRIVATE("ret=%d", ret);
 	return ret;
@@ -2156,7 +2161,7 @@ ia_css_isp_3a_statistics_allocate(const struct ia_css_3a_grid_info *grid)
 	me->hmem_size = CEIL_MUL(me->hmem_size, HIVE_ISP_DDR_WORD_BYTES);
 
 	me->size = me->dmem_size + me->vmem_size * 2 + me->hmem_size;
-	me->data_ptr = hmm_alloc(me->size);
+	me->data_ptr = hmm_alloc(me->size, HMM_BO_PRIVATE, 0, NULL, 0);
 	if (me->data_ptr == mmgr_NULL) {
 		kvfree(me);
 		me = NULL;
@@ -2206,7 +2211,7 @@ ia_css_metadata_allocate(const struct ia_css_metadata_info *metadata_info)
 
 	md->info = *metadata_info;
 	md->exp_id = 0;
-	md->address = hmm_alloc(metadata_info->size);
+	md->address = hmm_alloc(metadata_info->size, HMM_BO_PRIVATE, 0, NULL, 0);
 	if (md->address == mmgr_NULL)
 		goto error;
 
@@ -2359,13 +2364,13 @@ sh_css_create_isp_params(struct ia_css_stream *stream,
 	ddr_ptrs_size->isp_param = params_size;
 	ddr_ptrs->isp_param =
 	ia_css_refcount_increment(IA_CSS_REFCOUNT_PARAM_BUFFER,
-				  hmm_alloc(params_size));
+				  hmm_alloc(params_size, HMM_BO_PRIVATE, 0, NULL, 0));
 	succ &= (ddr_ptrs->isp_param != mmgr_NULL);
 
 	ddr_ptrs_size->macc_tbl = sizeof(struct ia_css_macc_table);
 	ddr_ptrs->macc_tbl =
 	ia_css_refcount_increment(IA_CSS_REFCOUNT_PARAM_BUFFER,
-				  hmm_alloc(sizeof(struct ia_css_macc_table)));
+				  hmm_alloc(sizeof(struct ia_css_macc_table), HMM_BO_PRIVATE, 0, NULL, 0));
 	succ &= (ddr_ptrs->macc_tbl != mmgr_NULL);
 
 	*isp_params_out = params;
@@ -2579,10 +2584,14 @@ sh_css_params_init(void)
 		for (i = 0; i < SH_CSS_MAX_STAGES; i++) {
 			xmem_sp_stage_ptrs[p][i] =
 			ia_css_refcount_increment(-1,
-						  hmm_alloc(sizeof(struct sh_css_sp_stage)));
+						  hmm_alloc(sizeof(struct sh_css_sp_stage),
+							    HMM_BO_PRIVATE, 0, NULL,
+							    ATOMISP_MAP_FLAG_CLEARED));
 			xmem_isp_stage_ptrs[p][i] =
 			ia_css_refcount_increment(-1,
-						  hmm_alloc(sizeof(struct sh_css_sp_stage)));
+						  hmm_alloc(sizeof(struct sh_css_sp_stage),
+							    HMM_BO_PRIVATE, 0, NULL,
+							    ATOMISP_MAP_FLAG_CLEARED));
 
 			if ((xmem_sp_stage_ptrs[p][i] == mmgr_NULL) ||
 			    (xmem_isp_stage_ptrs[p][i] == mmgr_NULL)) {
@@ -2590,9 +2599,6 @@ sh_css_params_init(void)
 				IA_CSS_LEAVE_ERR_PRIVATE(-ENOMEM);
 				return -ENOMEM;
 			}
-
-			hmm_set(xmem_sp_stage_ptrs[p][i], 0, sizeof(struct sh_css_sp_stage));
-			hmm_set(xmem_isp_stage_ptrs[p][i], 0, sizeof(struct sh_css_sp_stage));
 		}
 	}
 
@@ -2603,9 +2609,13 @@ sh_css_params_init(void)
 
 	sp_ddr_ptrs = ia_css_refcount_increment(-1,
 						hmm_alloc(CEIL_MUL(sizeof(struct sh_css_ddr_address_map),
-								   HIVE_ISP_DDR_WORD_BYTES)));
+								   HIVE_ISP_DDR_WORD_BYTES),
+							  HMM_BO_PRIVATE, 0, NULL,
+							  ATOMISP_MAP_FLAG_CLEARED));
 	xmem_sp_group_ptrs = ia_css_refcount_increment(-1,
-						       hmm_alloc(sizeof(struct sh_css_sp_group)));
+						       hmm_alloc(sizeof(struct sh_css_sp_group),
+								 HMM_BO_PRIVATE, 0, NULL,
+								 ATOMISP_MAP_FLAG_CLEARED));
 
 	if ((sp_ddr_ptrs == mmgr_NULL) ||
 	    (xmem_sp_group_ptrs == mmgr_NULL)) {
@@ -2613,9 +2623,6 @@ sh_css_params_init(void)
 		IA_CSS_LEAVE_ERR_PRIVATE(-ENOMEM);
 		return -ENOMEM;
 	}
-	hmm_set(sp_ddr_ptrs, 0, CEIL_MUL(sizeof(struct sh_css_ddr_address_map),
-					 HIVE_ISP_DDR_WORD_BYTES));
-	hmm_set(xmem_sp_group_ptrs, 0, sizeof(struct sh_css_sp_group));
 	IA_CSS_LEAVE_ERR_PRIVATE(0);
 	return 0;
 }
@@ -2660,7 +2667,7 @@ int ia_css_pipe_set_bci_scaler_lut(struct ia_css_pipe *pipe,
 	}
 
 	if (!stream_started) {
-		pipe->scaler_pp_lut = hmm_alloc(sizeof(zoom_table));
+		pipe->scaler_pp_lut = hmm_alloc(sizeof(zoom_table), HMM_BO_PRIVATE, 0, NULL, 0);
 
 		if (pipe->scaler_pp_lut == mmgr_NULL) {
 			ia_css_debug_dtrace(IA_CSS_DEBUG_ERROR,
@@ -2702,7 +2709,7 @@ int sh_css_params_map_and_store_default_gdc_lut(void)
 
 	host_lut_store((void *)zoom_table);
 
-	default_gdc_lut = hmm_alloc(sizeof(zoom_table));
+	default_gdc_lut = hmm_alloc(sizeof(zoom_table), HMM_BO_PRIVATE, 0, NULL, 0);
 
 	if (default_gdc_lut == mmgr_NULL)
 		return -ENOMEM;
@@ -3280,7 +3287,7 @@ sh_css_params_write_to_ddr_internal(
 	if (binary->info->sp.enable.fpnr) {
 		buff_realloced = reallocate_buffer(&ddr_map->fpn_tbl,
 						   &ddr_map_size->fpn_tbl,
-						   fpntbl_bytes(binary),
+						   (size_t)(FPNTBL_BYTES(binary)),
 						   params->config_changed[IA_CSS_FPN_ID],
 						   &err);
 		if (err) {
@@ -3305,7 +3312,7 @@ sh_css_params_write_to_ddr_internal(
 
 		buff_realloced = reallocate_buffer(&ddr_map->sc_tbl,
 						   &ddr_map_size->sc_tbl,
-						   sctbl_bytes(binary),
+						   SCTBL_BYTES(binary),
 						   params->sc_table_changed,
 						   &err);
 		if (err) {
@@ -3461,10 +3468,10 @@ sh_css_params_write_to_ddr_internal(
 			if (stage->args.delay_frames[0]) {
 				/*When delay frames are present(as in case of video),
 				they are used for dvs. Configure DVS using those params*/
-				dvs_in_frame_info = &stage->args.delay_frames[0]->frame_info;
+				dvs_in_frame_info = &stage->args.delay_frames[0]->info;
 			} else {
 				/*Otherwise, use input frame to configure DVS*/
-				dvs_in_frame_info = &stage->args.in_frame->frame_info;
+				dvs_in_frame_info = &stage->args.in_frame->info;
 			}
 
 			/* Generate default DVS unity table on start up*/
@@ -3539,7 +3546,8 @@ sh_css_params_write_to_ddr_internal(
 			buff_realloced |=
 			    reallocate_buffer(virt_addr_tetra_x[i],
 					    virt_size_tetra_x[i],
-					    morph_plane_bytes(binary),
+					    (size_t)
+					    (MORPH_PLANE_BYTES(binary)),
 					    params->morph_table_changed,
 					    &err);
 			if (err) {
@@ -3549,7 +3557,8 @@ sh_css_params_write_to_ddr_internal(
 			buff_realloced |=
 			    reallocate_buffer(virt_addr_tetra_y[i],
 					    virt_size_tetra_y[i],
-					    morph_plane_bytes(binary),
+					    (size_t)
+					    (MORPH_PLANE_BYTES(binary)),
 					    params->morph_table_changed,
 					    &err);
 			if (err) {
@@ -3711,47 +3720,10 @@ struct ia_css_shading_table *ia_css_get_shading_table(struct ia_css_stream
 
 ia_css_ptr sh_css_store_sp_group_to_ddr(void)
 {
-	u8 *write_buf;
-	u8 *buf_ptr;
-
 	IA_CSS_ENTER_LEAVE_PRIVATE("void");
-
-	write_buf = kzalloc(sizeof(u8) * 8192, GFP_KERNEL);
-	if (!write_buf)
-		return 0;
-
-	buf_ptr = write_buf;
-	if (IS_ISP2401) {
-		memcpy(buf_ptr, &sh_css_sp_group.config, 3);
-		buf_ptr += 3;
-		*buf_ptr++ = sh_css_sp_group.config.enable_isys_event_queue;
-		*buf_ptr++ = sh_css_sp_group.config.disable_cont_vf;
-		memset(buf_ptr, 0, 3);
-		buf_ptr += 3; /* Padding 3 bytes for struct sh_css_sp_config*/
-	} else {
-		memcpy(buf_ptr, &sh_css_sp_group.config, sizeof(sh_css_sp_group.config));
-		buf_ptr += sizeof(sh_css_sp_group.config);
-	}
-
-	memcpy(buf_ptr, &sh_css_sp_group.pipe, sizeof(sh_css_sp_group.pipe));
-	buf_ptr += sizeof(sh_css_sp_group.pipe);
-
-	if (IS_ISP2401) {
-		memcpy(buf_ptr, &sh_css_sp_group.pipe_io, sizeof(sh_css_sp_group.pipe_io));
-		buf_ptr += sizeof(sh_css_sp_group.pipe_io);
-		memcpy(buf_ptr, &sh_css_sp_group.pipe_io_status,
-		       sizeof(sh_css_sp_group.pipe_io_status));
-		buf_ptr += sizeof(sh_css_sp_group.pipe_io_status);
-	}
-
-	memcpy(buf_ptr, &sh_css_sp_group.debug, sizeof(sh_css_sp_group.debug));
-	buf_ptr += sizeof(sh_css_sp_group.debug);
-
 	hmm_store(xmem_sp_group_ptrs,
-		  write_buf,
-		  buf_ptr - write_buf);
-
-	kfree(write_buf);
+		   &sh_css_sp_group,
+		   sizeof(struct sh_css_sp_group));
 	return xmem_sp_group_ptrs;
 }
 
@@ -3830,7 +3802,7 @@ static int write_ia_css_isp_parameter_set_info_to_ddr(
 	assert(out);
 
 	*out = ia_css_refcount_increment(IA_CSS_REFCOUNT_PARAM_SET_POOL,
-					 hmm_alloc(sizeof(struct ia_css_isp_parameter_set_info)));
+					 hmm_alloc(sizeof(struct ia_css_isp_parameter_set_info), HMM_BO_PRIVATE, 0, NULL, 0));
 	succ = (*out != mmgr_NULL);
 	if (succ)
 		hmm_store(*out,
@@ -4172,8 +4144,6 @@ ia_css_3a_statistics_allocate(const struct ia_css_3a_grid_info *grid)
 		goto err;
 	/* No weighted histogram, no structure, treat the histogram data as a byte dump in a byte array */
 	me->rgby_data = kvmalloc(sizeof_hmem(HMEM0_ID), GFP_KERNEL);
-	if (!me->rgby_data)
-		goto err;
 
 	IA_CSS_LEAVE("return=%p", me);
 	return me;

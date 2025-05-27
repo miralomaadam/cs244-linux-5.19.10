@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/arm/vexpress-sysreg.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: ARM Versatile Express system registers
+title: ARM Versatile Express system registers bindings
 
 maintainers:
   - Andre Przywara <andre.przywara@arm.com>
@@ -28,13 +28,6 @@ properties:
     const: 1
 
   ranges: true
-
-  gpio-controller:
-    deprecated: true
-
-  "#gpio-cells":
-    deprecated: true
-    const: 2
 
 additionalProperties: false
 
@@ -74,7 +67,8 @@ patternProperties:
 
 required:
   - compatible
-  - reg
+  - "#address-cells"
+  - "#size-cells"
 
 examples:
   - |

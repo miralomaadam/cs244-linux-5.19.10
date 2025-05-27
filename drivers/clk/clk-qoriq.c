@@ -9,7 +9,6 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <dt-bindings/clock/fsl,qoriq-clockgen.h>
-#include <linux/cleanup.h>
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/clkdev.h>
@@ -18,8 +17,8 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of_address.h>
+#include <linux/of_platform.h>
 #include <linux/of.h>
-#include <linux/platform_device.h>
 #include <linux/slab.h>
 
 #define PLL_DIV1	0
@@ -879,7 +878,6 @@ static u8 mux_get_parent(struct clk_hw *hw)
 }
 
 static const struct clk_ops cmux_ops = {
-	.determine_rate = clk_hw_determine_rate_no_reparent,
 	.get_parent = mux_get_parent,
 	.set_parent = mux_set_parent,
 };
@@ -1065,10 +1063,8 @@ static void __init _clockgen_init(struct device_node *np, bool legacy);
  */
 static void __init legacy_init_clockgen(struct device_node *np)
 {
-	if (!clockgen.node) {
-		struct device_node *parent_np __free(device_node) = of_get_parent(np);
-		_clockgen_init(parent_np, true);
-	}
+	if (!clockgen.node)
+		_clockgen_init(of_get_parent(np), true);
 }
 
 /* Legacy node */
@@ -1163,7 +1159,6 @@ static struct clk * __init create_sysclk(const char *name)
 	sysclk = of_get_child_by_name(clockgen.node, "sysclk");
 	if (sysclk) {
 		clk = sysclk_from_fixed(sysclk, name);
-		of_node_put(sysclk);
 		if (!IS_ERR(clk))
 			return clk;
 	}

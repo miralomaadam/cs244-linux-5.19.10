@@ -448,7 +448,7 @@ static irqreturn_t ads1015_trigger_handler(int irq, void *p)
 	/* Ensure natural alignment of timestamp */
 	struct {
 		s16 chan;
-		aligned_s64 timestamp;
+		s64 timestamp __aligned(8);
 	} scan;
 	int chan, ret, res;
 
@@ -456,7 +456,7 @@ static irqreturn_t ads1015_trigger_handler(int irq, void *p)
 
 	mutex_lock(&data->lock);
 	chan = find_first_bit(indio_dev->active_scan_mask,
-			      iio_get_masklength(indio_dev));
+			      indio_dev->masklength);
 	ret = ads1015_get_adc_result(data, chan, &res);
 	if (ret < 0) {
 		mutex_unlock(&data->lock);
@@ -806,7 +806,7 @@ static int ads1015_disable_event_config(struct ads1015_data *data,
 
 static int ads1015_write_event_config(struct iio_dev *indio_dev,
 	const struct iio_chan_spec *chan, enum iio_event_type type,
-	enum iio_event_direction dir, bool state)
+	enum iio_event_direction dir, int state)
 {
 	struct ads1015_data *data = iio_priv(indio_dev);
 	int ret;
@@ -902,9 +902,10 @@ static int ads1015_client_get_channels_config(struct i2c_client *client)
 	struct iio_dev *indio_dev = i2c_get_clientdata(client);
 	struct ads1015_data *data = iio_priv(indio_dev);
 	struct device *dev = &client->dev;
+	struct fwnode_handle *node;
 	int i = -1;
 
-	device_for_each_child_node_scoped(dev, node) {
+	device_for_each_child_node(dev, node) {
 		u32 pval;
 		unsigned int channel;
 		unsigned int pga = ADS1015_DEFAULT_PGA;
@@ -924,8 +925,9 @@ static int ads1015_client_get_channels_config(struct i2c_client *client)
 
 		if (!fwnode_property_read_u32(node, "ti,gain", &pval)) {
 			pga = pval;
-			if (pga > 5) {
+			if (pga > 6) {
 				dev_err(dev, "invalid gain on %pfw\n", node);
+				fwnode_handle_put(node);
 				return -EINVAL;
 			}
 		}
@@ -934,6 +936,7 @@ static int ads1015_client_get_channels_config(struct i2c_client *client)
 			data_rate = pval;
 			if (data_rate > 7) {
 				dev_err(dev, "invalid data_rate on %pfw\n", node);
+				fwnode_handle_put(node);
 				return -EINVAL;
 			}
 		}
@@ -971,7 +974,8 @@ static int ads1015_set_conv_mode(struct ads1015_data *data, int mode)
 				  mode << ADS1015_CFG_MOD_SHIFT);
 }
 
-static int ads1015_probe(struct i2c_client *client)
+static int ads1015_probe(struct i2c_client *client,
+			 const struct i2c_device_id *id)
 {
 	const struct ads1015_chip_data *chip;
 	struct iio_dev *indio_dev;
@@ -979,7 +983,9 @@ static int ads1015_probe(struct i2c_client *client)
 	int ret;
 	int i;
 
-	chip = i2c_get_match_data(client);
+	chip = device_get_match_data(&client->dev);
+	if (!chip)
+		chip = (const struct ads1015_chip_data *)id->driver_data;
 	if (!chip)
 		return dev_err_probe(&client->dev, -EINVAL, "Unknown chip\n");
 
@@ -1032,7 +1038,8 @@ static int ads1015_probe(struct i2c_client *client)
 	}
 
 	if (client->irq && chip->has_comparator) {
-		unsigned long irq_trig = irq_get_trigger_type(client->irq);
+		unsigned long irq_trig =
+			irqd_get_trigger_type(irq_get_irq_data(client->irq));
 		unsigned int cfg_comp_mask = ADS1015_CFG_COMP_QUE_MASK |
 			ADS1015_CFG_COMP_LAT_MASK | ADS1015_CFG_COMP_POL_MASK;
 		unsigned int cfg_comp =
@@ -1040,13 +1047,11 @@ static int ads1015_probe(struct i2c_client *client)
 			1 << ADS1015_CFG_COMP_LAT_SHIFT;
 
 		switch (irq_trig) {
-		case IRQF_TRIGGER_FALLING:
 		case IRQF_TRIGGER_LOW:
 			cfg_comp |= ADS1015_CFG_COMP_POL_LOW <<
 					ADS1015_CFG_COMP_POL_SHIFT;
 			break;
 		case IRQF_TRIGGER_HIGH:
-		case IRQF_TRIGGER_RISING:
 			cfg_comp |= ADS1015_CFG_COMP_POL_HIGH <<
 					ADS1015_CFG_COMP_POL_SHIFT;
 			break;
@@ -1089,11 +1094,10 @@ static int ads1015_probe(struct i2c_client *client)
 	return 0;
 }
 
-static void ads1015_remove(struct i2c_client *client)
+static int ads1015_remove(struct i2c_client *client)
 {
 	struct iio_dev *indio_dev = i2c_get_clientdata(client);
 	struct ads1015_data *data = iio_priv(indio_dev);
-	int ret;
 
 	iio_device_unregister(indio_dev);
 
@@ -1101,10 +1105,7 @@ static void ads1015_remove(struct i2c_client *client)
 	pm_runtime_set_suspended(&client->dev);
 
 	/* power down single shot mode */
-	ret = ads1015_set_conv_mode(data, ADS1015_SINGLESHOT);
-	if (ret)
-		dev_warn(&client->dev, "Failed to power down (%pe)\n",
-			 ERR_PTR(ret));
+	return ads1015_set_conv_mode(data, ADS1015_SINGLESHOT);
 }
 
 #ifdef CONFIG_PM
@@ -1172,7 +1173,7 @@ static const struct i2c_device_id ads1015_id[] = {
 	{ "ads1015", (kernel_ulong_t)&ads1015_data },
 	{ "ads1115", (kernel_ulong_t)&ads1115_data },
 	{ "tla2024", (kernel_ulong_t)&tla2024_data },
-	{ }
+	{}
 };
 MODULE_DEVICE_TABLE(i2c, ads1015_id);
 
@@ -1180,7 +1181,7 @@ static const struct of_device_id ads1015_of_match[] = {
 	{ .compatible = "ti,ads1015", .data = &ads1015_data },
 	{ .compatible = "ti,ads1115", .data = &ads1115_data },
 	{ .compatible = "ti,tla2024", .data = &tla2024_data },
-	{ }
+	{}
 };
 MODULE_DEVICE_TABLE(of, ads1015_of_match);
 

@@ -758,7 +758,7 @@ static irqreturn_t sis190_irq(int irq, void *__dev)
 
 	if (status & LinkChange) {
 		netif_info(tp, intr, dev, "link change\n");
-		timer_delete(&tp->timer);
+		del_timer(&tp->timer);
 		schedule_work(&tp->phy_task);
 	}
 
@@ -1034,7 +1034,7 @@ static inline void sis190_delete_timer(struct net_device *dev)
 {
 	struct sis190_private *tp = netdev_priv(dev);
 
-	timer_delete_sync(&tp->timer);
+	del_timer_sync(&tp->timer);
 }
 
 static inline void sis190_request_timer(struct net_device *dev)
@@ -1769,9 +1769,9 @@ static void sis190_get_drvinfo(struct net_device *dev,
 {
 	struct sis190_private *tp = netdev_priv(dev);
 
-	strscpy(info->driver, DRV_NAME, sizeof(info->driver));
-	strscpy(info->version, DRV_VERSION, sizeof(info->version));
-	strscpy(info->bus_info, pci_name(tp->pci_dev),
+	strlcpy(info->driver, DRV_NAME, sizeof(info->driver));
+	strlcpy(info->version, DRV_VERSION, sizeof(info->version));
+	strlcpy(info->bus_info, pci_name(tp->pci_dev),
 		sizeof(info->bus_info));
 }
 

@@ -5,7 +5,6 @@
 
 #include "sun50i-h6.dtsi"
 #include "sun50i-h6-cpu-opp.dtsi"
-#include "sun50i-h6-gpu-opp.dtsi"
 
 #include <dt-bindings/gpio/gpio.h>
 
@@ -34,7 +33,7 @@
 		};
 	};
 
-	ext_osc32k: ext-osc32k-clk {
+	ext_osc32k: ext_osc32k_clk {
 		#clock-cells = <0>;
 		compatible = "fixed-clock";
 		clock-frequency = <32768>;
@@ -129,7 +128,6 @@
 &mmc0 {
 	vmmc-supply = <&reg_cldo1>;
 	cd-gpios = <&pio 5 6 GPIO_ACTIVE_LOW>;
-	disable-wp;
 	bus-width = <4>;
 	status = "okay";
 };
@@ -292,8 +290,6 @@
 };
 
 &spdif {
-	pinctrl-names = "default";
-	pinctrl-0 = <&spdif_tx_pin>;
 	status = "okay";
 };
 

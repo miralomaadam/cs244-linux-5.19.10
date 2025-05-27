@@ -24,6 +24,7 @@
 #include <linux/of.h>
 #include <linux/pm_qos.h>
 #include <linux/slab.h>
+#include <linux/units.h>
 
 struct dtpm_cpu {
 	struct dtpm dtpm;
@@ -42,57 +43,69 @@ static u64 set_pd_power_limit(struct dtpm *dtpm, u64 power_limit)
 {
 	struct dtpm_cpu *dtpm_cpu = to_dtpm_cpu(dtpm);
 	struct em_perf_domain *pd = em_cpu_get(dtpm_cpu->cpu);
-	struct em_perf_state *table;
+	struct cpumask cpus;
 	unsigned long freq;
 	u64 power;
 	int i, nr_cpus;
 
-	nr_cpus = cpumask_weight_and(cpu_online_mask, to_cpumask(pd->cpus));
+	cpumask_and(&cpus, cpu_online_mask, to_cpumask(pd->cpus));
+	nr_cpus = cpumask_weight(&cpus);
 
-	rcu_read_lock();
-	table = em_perf_state_from_pd(pd);
 	for (i = 0; i < pd->nr_perf_states; i++) {
 
-		power = table[i].power * nr_cpus;
+		power = pd->table[i].power * nr_cpus;
 
 		if (power > power_limit)
 			break;
 	}
 
-	freq = table[i - 1].frequency;
-	power_limit = table[i - 1].power * nr_cpus;
-	rcu_read_unlock();
+	freq = pd->table[i - 1].frequency;
 
 	freq_qos_update_request(&dtpm_cpu->qos_req, freq);
+
+	power_limit = pd->table[i - 1].power * nr_cpus;
 
 	return power_limit;
 }
 
 static u64 scale_pd_power_uw(struct cpumask *pd_mask, u64 power)
 {
-	unsigned long max, sum_util = 0;
+	unsigned long max = 0, sum_util = 0;
 	int cpu;
 
+	for_each_cpu_and(cpu, pd_mask, cpu_online_mask) {
+
+		/*
+		 * The capacity is the same for all CPUs belonging to
+		 * the same perf domain, so a single call to
+		 * arch_scale_cpu_capacity() is enough. However, we
+		 * need the CPU parameter to be initialized by the
+		 * loop, so the call ends up in this block.
+		 *
+		 * We can initialize 'max' with a cpumask_first() call
+		 * before the loop but the bits computation is not
+		 * worth given the arch_scale_cpu_capacity() just
+		 * returns a value where the resulting assembly code
+		 * will be optimized by the compiler.
+		 */
+		max = arch_scale_cpu_capacity(cpu);
+		sum_util += sched_cpu_util(cpu, max);
+	}
+
 	/*
-	 * The capacity is the same for all CPUs belonging to
-	 * the same perf domain.
+	 * In the improbable case where all the CPUs of the perf
+	 * domain are offline, 'max' will be zero and will lead to an
+	 * illegal operation with a zero division.
 	 */
-	max = arch_scale_cpu_capacity(cpumask_first(pd_mask));
-
-	for_each_cpu_and(cpu, pd_mask, cpu_online_mask)
-		sum_util += sched_cpu_util(cpu);
-
-	return (power * ((sum_util << 10) / max)) >> 10;
+	return max ? (power * ((sum_util << 10) / max)) >> 10 : 0;
 }
 
 static u64 get_pd_power_uw(struct dtpm *dtpm)
 {
 	struct dtpm_cpu *dtpm_cpu = to_dtpm_cpu(dtpm);
-	struct em_perf_state *table;
 	struct em_perf_domain *pd;
 	struct cpumask *pd_mask;
 	unsigned long freq;
-	u64 power = 0;
 	int i;
 
 	pd = em_cpu_get(dtpm_cpu->cpu);
@@ -101,40 +114,35 @@ static u64 get_pd_power_uw(struct dtpm *dtpm)
 
 	freq = cpufreq_quick_get(dtpm_cpu->cpu);
 
-	rcu_read_lock();
-	table = em_perf_state_from_pd(pd);
 	for (i = 0; i < pd->nr_perf_states; i++) {
 
-		if (table[i].frequency < freq)
+		if (pd->table[i].frequency < freq)
 			continue;
 
-		power = scale_pd_power_uw(pd_mask, table[i].power);
-		break;
+		return scale_pd_power_uw(pd_mask, pd->table[i].power *
+					 MICROWATT_PER_MILLIWATT);
 	}
-	rcu_read_unlock();
 
-	return power;
+	return 0;
 }
 
 static int update_pd_power_uw(struct dtpm *dtpm)
 {
 	struct dtpm_cpu *dtpm_cpu = to_dtpm_cpu(dtpm);
 	struct em_perf_domain *em = em_cpu_get(dtpm_cpu->cpu);
-	struct em_perf_state *table;
+	struct cpumask cpus;
 	int nr_cpus;
 
-	nr_cpus = cpumask_weight_and(cpu_online_mask, to_cpumask(em->cpus));
+	cpumask_and(&cpus, cpu_online_mask, to_cpumask(em->cpus));
+	nr_cpus = cpumask_weight(&cpus);
 
-	rcu_read_lock();
-	table = em_perf_state_from_pd(em);
-
-	dtpm->power_min = table[0].power;
+	dtpm->power_min = em->table[0].power;
+	dtpm->power_min *= MICROWATT_PER_MILLIWATT;
 	dtpm->power_min *= nr_cpus;
 
-	dtpm->power_max = table[em->nr_perf_states - 1].power;
+	dtpm->power_max = em->table[em->nr_perf_states - 1].power;
+	dtpm->power_max *= MICROWATT_PER_MILLIWATT;
 	dtpm->power_max *= nr_cpus;
-
-	rcu_read_unlock();
 
 	return 0;
 }
@@ -151,10 +159,8 @@ static void pd_release(struct dtpm *dtpm)
 	if (policy) {
 		for_each_cpu(dtpm_cpu->cpu, policy->related_cpus)
 			per_cpu(dtpm_per_cpu, dtpm_cpu->cpu) = NULL;
-
-		cpufreq_cpu_put(policy);
 	}
-
+	
 	kfree(dtpm_cpu);
 }
 
@@ -191,7 +197,6 @@ static int __dtpm_cpu_setup(int cpu, struct dtpm *parent)
 {
 	struct dtpm_cpu *dtpm_cpu;
 	struct cpufreq_policy *policy;
-	struct em_perf_state *table;
 	struct em_perf_domain *pd;
 	char name[CPUFREQ_NAME_LEN];
 	int ret = -ENOMEM;
@@ -205,16 +210,12 @@ static int __dtpm_cpu_setup(int cpu, struct dtpm *parent)
 		return 0;
 
 	pd = em_cpu_get(cpu);
-	if (!pd || em_is_artificial(pd)) {
-		ret = -EINVAL;
-		goto release_policy;
-	}
+	if (!pd || em_is_artificial(pd))
+		return -EINVAL;
 
 	dtpm_cpu = kzalloc(sizeof(*dtpm_cpu), GFP_KERNEL);
-	if (!dtpm_cpu) {
-		ret = -ENOMEM;
-		goto release_policy;
-	}
+	if (!dtpm_cpu)
+		return -ENOMEM;
 
 	dtpm_init(&dtpm_cpu->dtpm, &dtpm_ops);
 	dtpm_cpu->cpu = cpu;
@@ -228,16 +229,12 @@ static int __dtpm_cpu_setup(int cpu, struct dtpm *parent)
 	if (ret)
 		goto out_kfree_dtpm_cpu;
 
-	rcu_read_lock();
-	table = em_perf_state_from_pd(pd);
 	ret = freq_qos_add_request(&policy->constraints,
 				   &dtpm_cpu->qos_req, FREQ_QOS_MAX,
-				   table[pd->nr_perf_states - 1].frequency);
-	rcu_read_unlock();
-	if (ret < 0)
+				   pd->table[pd->nr_perf_states - 1].frequency);
+	if (ret)
 		goto out_dtpm_unregister;
 
-	cpufreq_cpu_put(policy);
 	return 0;
 
 out_dtpm_unregister:
@@ -249,8 +246,6 @@ out_kfree_dtpm_cpu:
 		per_cpu(dtpm_per_cpu, cpu) = NULL;
 	kfree(dtpm_cpu);
 
-release_policy:
-	cpufreq_cpu_put(policy);
 	return ret;
 }
 

@@ -2,8 +2,6 @@
 #include <linux/perf_event.h>
 #include <linux/types.h>
 
-#include <asm/cpu_device_id.h>
-
 #include "../perf_event.h"
 
 /*
@@ -216,7 +214,7 @@ static __initconst const struct x86_pmu p6_pmu = {
 	.apic			= 1,
 	.max_period		= (1ULL << 31) - 1,
 	.version		= 0,
-	.cntr_mask64		= 0x3,
+	.num_counters		= 2,
 	/*
 	 * Events have 40 bits implemented. However they are designed such
 	 * that bits [32-39] are sign extensions of bit 31. As such the
@@ -250,8 +248,30 @@ __init int p6_pmu_init(void)
 {
 	x86_pmu = p6_pmu;
 
-	if (boot_cpu_data.x86_vfm == INTEL_PENTIUM_PRO)
+	switch (boot_cpu_data.x86_model) {
+	case  1: /* Pentium Pro */
 		x86_add_quirk(p6_pmu_rdpmc_quirk);
+		break;
+
+	case  3: /* Pentium II - Klamath */
+	case  5: /* Pentium II - Deschutes */
+	case  6: /* Pentium II - Mendocino */
+		break;
+
+	case  7: /* Pentium III - Katmai */
+	case  8: /* Pentium III - Coppermine */
+	case 10: /* Pentium III Xeon */
+	case 11: /* Pentium III - Tualatin */
+		break;
+
+	case  9: /* Pentium M - Banias */
+	case 13: /* Pentium M - Dothan */
+		break;
+
+	default:
+		pr_cont("unsupported p6 CPU model %d ", boot_cpu_data.x86_model);
+		return -ENODEV;
+	}
 
 	memcpy(hw_cache_event_ids, p6_hw_cache_event_ids,
 		sizeof(hw_cache_event_ids));

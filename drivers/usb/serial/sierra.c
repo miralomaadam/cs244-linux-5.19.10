@@ -421,7 +421,7 @@ static int sierra_write(struct tty_struct *tty, struct usb_serial_port *port,
 	unsigned long flags;
 	unsigned char *buffer;
 	struct urb *urb;
-	size_t writesize = min_t(size_t, count, MAX_TRANSFER);
+	size_t writesize = min((size_t)count, (size_t)MAX_TRANSFER);
 	int retval = 0;
 
 	/* verify that we actually have some data to write */
@@ -453,7 +453,7 @@ static int sierra_write(struct tty_struct *tty, struct usb_serial_port *port,
 		goto error_simple;
 	}
 
-	buffer = kmemdup(buf, writesize, GFP_ATOMIC);
+	buffer = kmalloc(writesize, GFP_ATOMIC);
 	if (!buffer) {
 		retval = -ENOMEM;
 		goto error_no_buffer;
@@ -464,6 +464,8 @@ static int sierra_write(struct tty_struct *tty, struct usb_serial_port *port,
 		retval = -ENOMEM;
 		goto error_no_urb;
 	}
+
+	memcpy(buffer, buf, writesize);
 
 	usb_serial_debug_data(&port->dev, __func__, writesize, buffer);
 
@@ -1021,6 +1023,7 @@ static int sierra_resume(struct usb_serial *serial)
 
 static struct usb_serial_driver sierra_device = {
 	.driver = {
+		.owner =	THIS_MODULE,
 		.name =		"sierra",
 	},
 	.description       = "Sierra USB modem",

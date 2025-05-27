@@ -112,17 +112,14 @@ static int wakeup_display_graph(struct trace_array *tr, int set)
 	return start_func_tracer(tr, set);
 }
 
-static int wakeup_graph_entry(struct ftrace_graph_ent *trace,
-			      struct fgraph_ops *gops,
-			      struct ftrace_regs *fregs)
+static int wakeup_graph_entry(struct ftrace_graph_ent *trace)
 {
 	struct trace_array *tr = wakeup_trace;
 	struct trace_array_cpu *data;
 	unsigned int trace_ctx;
-	u64 *calltime;
 	int ret = 0;
 
-	if (ftrace_graph_ignore_func(gops, trace))
+	if (ftrace_graph_ignore_func(trace))
 		return 0;
 	/*
 	 * Do not trace a function if it's filtered by set_graph_notrace.
@@ -137,12 +134,6 @@ static int wakeup_graph_entry(struct ftrace_graph_ent *trace,
 	if (!func_prolog_preempt_disable(tr, &data, &trace_ctx))
 		return 0;
 
-	calltime = fgraph_reserve_data(gops->idx, sizeof(*calltime));
-	if (!calltime)
-		return 0;
-
-	*calltime = trace_clock_local();
-
 	ret = __trace_graph_entry(tr, trace, trace_ctx);
 	atomic_dec(&data->disabled);
 	preempt_enable_notrace();
@@ -150,29 +141,18 @@ static int wakeup_graph_entry(struct ftrace_graph_ent *trace,
 	return ret;
 }
 
-static void wakeup_graph_return(struct ftrace_graph_ret *trace,
-				struct fgraph_ops *gops,
-				struct ftrace_regs *fregs)
+static void wakeup_graph_return(struct ftrace_graph_ret *trace)
 {
 	struct trace_array *tr = wakeup_trace;
 	struct trace_array_cpu *data;
 	unsigned int trace_ctx;
-	u64 *calltime;
-	u64 rettime;
-	int size;
 
-	ftrace_graph_addr_finish(gops, trace);
+	ftrace_graph_addr_finish(trace);
 
 	if (!func_prolog_preempt_disable(tr, &data, &trace_ctx))
 		return;
 
-	rettime = trace_clock_local();
-
-	calltime = fgraph_retrieve_data(gops->idx, &size);
-	if (!calltime)
-		return;
-
-	__trace_graph_return(tr, trace, trace_ctx, *calltime, rettime);
+	__trace_graph_return(tr, trace, trace_ctx);
 	atomic_dec(&data->disabled);
 
 	preempt_enable_notrace();
@@ -240,7 +220,7 @@ wakeup_tracer_call(unsigned long ip, unsigned long parent_ip,
 		return;
 
 	local_irq_save(flags);
-	trace_function(tr, ip, parent_ip, trace_ctx, fregs);
+	trace_function(tr, ip, parent_ip, trace_ctx);
 	local_irq_restore(flags);
 
 	atomic_dec(&data->disabled);
@@ -325,7 +305,7 @@ __trace_function(struct trace_array *tr,
 	if (is_graph(tr))
 		trace_graph_function(tr, ip, parent_ip, trace_ctx);
 	else
-		trace_function(tr, ip, parent_ip, trace_ctx, NULL);
+		trace_function(tr, ip, parent_ip, trace_ctx);
 }
 
 static int wakeup_flag_changed(struct trace_array *tr, u32 mask, int set)
@@ -394,6 +374,7 @@ tracing_sched_switch_trace(struct trace_array *tr,
 			   struct task_struct *next,
 			   unsigned int trace_ctx)
 {
+	struct trace_event_call *call = &event_context_switch;
 	struct trace_buffer *buffer = tr->array_buffer.buffer;
 	struct ring_buffer_event *event;
 	struct ctx_switch_entry *entry;
@@ -411,7 +392,8 @@ tracing_sched_switch_trace(struct trace_array *tr,
 	entry->next_state		= task_state_index(next);
 	entry->next_cpu	= task_cpu(next);
 
-	trace_buffer_unlock_commit(tr, buffer, event, trace_ctx);
+	if (!call_filter_check_discard(call, entry, buffer, event))
+		trace_buffer_unlock_commit(tr, buffer, event, trace_ctx);
 }
 
 static void
@@ -420,6 +402,7 @@ tracing_sched_wakeup_trace(struct trace_array *tr,
 			   struct task_struct *curr,
 			   unsigned int trace_ctx)
 {
+	struct trace_event_call *call = &event_wakeup;
 	struct ring_buffer_event *event;
 	struct ctx_switch_entry *entry;
 	struct trace_buffer *buffer = tr->array_buffer.buffer;
@@ -437,7 +420,8 @@ tracing_sched_wakeup_trace(struct trace_array *tr,
 	entry->next_state		= task_state_index(wakee);
 	entry->next_cpu			= task_cpu(wakee);
 
-	trace_buffer_unlock_commit(tr, buffer, event, trace_ctx);
+	if (!call_filter_check_discard(call, entry, buffer, event))
+		trace_buffer_unlock_commit(tr, buffer, event, trace_ctx);
 }
 
 static void notrace
@@ -559,7 +543,7 @@ probe_wakeup(void *ignore, struct task_struct *p)
 	 *  - wakeup_dl handles tasks belonging to sched_dl class only.
 	 */
 	if (tracing_dl || (wakeup_dl && !dl_task(p)) ||
-	    (wakeup_rt && !rt_or_dl_task(p)) ||
+	    (wakeup_rt && !dl_task(p) && !rt_task(p)) ||
 	    (!dl_task(p) && (p->prio >= wakeup_prio || p->prio >= current->prio)))
 		return;
 

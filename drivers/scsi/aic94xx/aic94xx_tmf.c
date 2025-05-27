@@ -31,7 +31,7 @@ static int asd_enqueue_internal(struct asd_ascb *ascb,
 
 	res = asd_post_ascb_list(ascb->ha, ascb, 1);
 	if (unlikely(res))
-		timer_delete(&ascb->timer);
+		del_timer(&ascb->timer);
 	return res;
 }
 
@@ -58,7 +58,7 @@ static void asd_clear_nexus_tasklet_complete(struct asd_ascb *ascb,
 {
 	struct tasklet_completion_status *tcs = ascb->uldd_task;
 	ASD_DPRINTK("%s: here\n", __func__);
-	if (!timer_delete(&ascb->timer)) {
+	if (!del_timer(&ascb->timer)) {
 		ASD_DPRINTK("%s: couldn't delete timer\n", __func__);
 		return;
 	}
@@ -303,7 +303,7 @@ static void asd_tmf_tasklet_complete(struct asd_ascb *ascb,
 {
 	struct tasklet_completion_status *tcs;
 
-	if (!timer_delete(&ascb->timer))
+	if (!del_timer(&ascb->timer))
 		return;
 
 	tcs = ascb->uldd_task;

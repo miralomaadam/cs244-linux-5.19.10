@@ -2,11 +2,11 @@
 #ifndef _ASM_FSGSBASE_H
 #define _ASM_FSGSBASE_H
 
-#ifndef __ASSEMBLER__
+#ifndef __ASSEMBLY__
 
 #ifdef CONFIG_X86_64
 
-#include <asm/msr.h>
+#include <asm/msr-index.h>
 
 /*
  * Read/write a task's FSBASE or GSBASE. This returns the value that
@@ -80,6 +80,6 @@ extern unsigned long x86_fsgsbase_read_task(struct task_struct *task,
 
 #endif /* CONFIG_X86_64 */
 
-#endif /* __ASSEMBLER__ */
+#endif /* __ASSEMBLY__ */
 
 #endif /* _ASM_FSGSBASE_H */

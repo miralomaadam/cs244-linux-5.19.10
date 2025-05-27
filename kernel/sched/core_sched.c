@@ -56,6 +56,7 @@ static unsigned long sched_core_update_cookie(struct task_struct *p,
 	unsigned long old_cookie;
 	struct rq_flags rf;
 	struct rq *rq;
+	bool enqueued;
 
 	rq = task_rq_lock(p, &rf);
 
@@ -65,18 +66,16 @@ static unsigned long sched_core_update_cookie(struct task_struct *p,
 	 * a cookie until after we've removed it, we must have core scheduling
 	 * enabled here.
 	 */
-	WARN_ON_ONCE((p->core_cookie || cookie) && !sched_core_enabled(rq));
+	SCHED_WARN_ON((p->core_cookie || cookie) && !sched_core_enabled(rq));
 
-	if (sched_core_enqueued(p))
+	enqueued = sched_core_enqueued(p);
+	if (enqueued)
 		sched_core_dequeue(rq, p, DEQUEUE_SAVE);
 
 	old_cookie = p->core_cookie;
 	p->core_cookie = cookie;
 
-	/*
-	 * Consider the cases: !prev_cookie and !cookie.
-	 */
-	if (cookie && task_on_rq_queued(p))
+	if (enqueued)
 		sched_core_enqueue(rq, p);
 
 	/*
@@ -88,7 +87,7 @@ static unsigned long sched_core_update_cookie(struct task_struct *p,
 	 * core has now entered/left forced idle state. Defer accounting to the
 	 * next scheduling edge, rather than always forcing a reschedule here.
 	 */
-	if (task_on_cpu(rq, p))
+	if (task_running(rq, p))
 		resched_curr(rq);
 
 	task_rq_unlock(rq, p, &rf);
@@ -205,7 +204,7 @@ int sched_core_share_pid(unsigned int cmd, pid_t pid, enum pid_type type,
 	default:
 		err = -EINVAL;
 		goto out;
-	}
+	};
 
 	if (type == PIDTYPE_PID) {
 		__sched_core_set(task, cookie);
@@ -278,11 +277,7 @@ void __sched_core_account_forceidle(struct rq *rq)
 		if (p == rq_i->idle)
 			continue;
 
-		/*
-		 * Note: this will account forceidle to the current CPU, even
-		 * if it comes from our SMT sibling.
-		 */
-		__account_forceidle_time(p, delta);
+		__schedstat_add(p->stats.core_forceidle_sum, delta);
 	}
 }
 

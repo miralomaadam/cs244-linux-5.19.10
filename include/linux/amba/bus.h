@@ -67,7 +67,6 @@ struct amba_device {
 	struct clk		*pclk;
 	struct device_dma_parameters dma_parms;
 	unsigned int		periphid;
-	struct mutex		periphid_lock;
 	unsigned int		cid;
 	struct amba_cs_uci_id	uci;
 	unsigned int		irq[AMBA_NR_IRQS];
@@ -105,35 +104,23 @@ enum amba_vendor {
 	AMBA_VENDOR_LSI = 0xb6,
 };
 
-extern const struct bus_type amba_bustype;
+extern struct bus_type amba_bustype;
 
-#define to_amba_device(d)	container_of_const(d, struct amba_device, dev)
+#define to_amba_device(d)	container_of(d, struct amba_device, dev)
 
 #define amba_get_drvdata(d)	dev_get_drvdata(&d->dev)
 #define amba_set_drvdata(d,p)	dev_set_drvdata(&d->dev, p)
 
-/*
- * use a macro to avoid include chaining to get THIS_MODULE
- */
-#define amba_driver_register(drv) \
-	__amba_driver_register(drv, THIS_MODULE)
-
 #ifdef CONFIG_ARM_AMBA
-int __amba_driver_register(struct amba_driver *, struct module *);
+int amba_driver_register(struct amba_driver *);
 void amba_driver_unregister(struct amba_driver *);
-bool dev_is_amba(const struct device *dev);
 #else
-static inline int __amba_driver_register(struct amba_driver *drv,
-					 struct module *owner)
+static inline int amba_driver_register(struct amba_driver *drv)
 {
 	return -EINVAL;
 }
 static inline void amba_driver_unregister(struct amba_driver *drv)
 {
-}
-static inline bool dev_is_amba(const struct device *dev)
-{
-	return false;
 }
 #endif
 

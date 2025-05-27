@@ -5,12 +5,15 @@
 
 #include <linux/component.h>
 #include <linux/module.h>
-#include <linux/of.h>
-#include <linux/platform_device.h>
+#include <linux/of_address.h>
+#include <linux/of_device.h>
+#include <linux/of_irq.h>
+#include <linux/of_graph.h>
 #include <video/mipi_display.h>
 
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
+#include <drm/drm_crtc_helper.h>
 #include <drm/drm_of.h>
 #include <drm/drm_probe_helper.h>
 
@@ -209,7 +212,7 @@ static int regmap_tst_io_read(void *context, u32 reg, u32 *val)
 	return 0;
 }
 
-static const struct regmap_bus regmap_tst_io = {
+static struct regmap_bus regmap_tst_io = {
 	.reg_write = regmap_tst_io_write,
 	.reg_read = regmap_tst_io_read,
 };
@@ -1051,11 +1054,13 @@ static int sprd_dsi_probe(struct platform_device *pdev)
 	return mipi_dsi_host_register(&dsi->host);
 }
 
-static void sprd_dsi_remove(struct platform_device *pdev)
+static int sprd_dsi_remove(struct platform_device *pdev)
 {
 	struct sprd_dsi *dsi = dev_get_drvdata(&pdev->dev);
 
 	mipi_dsi_host_unregister(&dsi->host);
+
+	return 0;
 }
 
 struct platform_driver sprd_dsi_driver = {

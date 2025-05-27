@@ -13,7 +13,6 @@
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/skbuff.h>
-#include <net/gso.h>
 #include <net/netlink.h>
 #include <net/sch_generic.h>
 #include <net/pkt_cls.h>
@@ -208,7 +207,7 @@ static int tbf_segment(struct sk_buff *skb, struct Qdisc *sch,
 	struct tbf_sched_data *q = qdisc_priv(sch);
 	struct sk_buff *segs, *nskb;
 	netdev_features_t features = netif_skb_features(skb);
-	unsigned int len = 0, prev_len = qdisc_pkt_len(skb), seg_len;
+	unsigned int len = 0, prev_len = qdisc_pkt_len(skb);
 	int ret, nb;
 
 	segs = skb_gso_segment(skb, features & ~NETIF_F_GSO_MASK);
@@ -219,27 +218,21 @@ static int tbf_segment(struct sk_buff *skb, struct Qdisc *sch,
 	nb = 0;
 	skb_list_walk_safe(segs, segs, nskb) {
 		skb_mark_not_on_list(segs);
-		seg_len = segs->len;
-		qdisc_skb_cb(segs)->pkt_len = seg_len;
+		qdisc_skb_cb(segs)->pkt_len = segs->len;
+		len += segs->len;
 		ret = qdisc_enqueue(segs, q->qdisc, to_free);
 		if (ret != NET_XMIT_SUCCESS) {
 			if (net_xmit_drop_count(ret))
 				qdisc_qstats_drop(sch);
 		} else {
 			nb++;
-			len += seg_len;
 		}
 	}
 	sch->q.qlen += nb;
-	sch->qstats.backlog += len;
-	if (nb > 0) {
+	if (nb > 1)
 		qdisc_tree_reduce_backlog(sch, 1 - nb, prev_len - len);
-		consume_skb(skb);
-		return NET_XMIT_SUCCESS;
-	}
-
-	kfree_skb(skb);
-	return NET_XMIT_DROP;
+	consume_skb(skb);
+	return nb > 0 ? NET_XMIT_SUCCESS : NET_XMIT_DROP;
 }
 
 static int tbf_enqueue(struct sk_buff *skb, struct Qdisc *sch,
@@ -337,6 +330,8 @@ static void tbf_reset(struct Qdisc *sch)
 	struct tbf_sched_data *q = qdisc_priv(sch);
 
 	qdisc_reset(q->qdisc);
+	sch->qstats.backlog = 0;
+	sch->q.qlen = 0;
 	q->t_c = ktime_get_ns();
 	q->tokens = q->buffer;
 	q->ptokens = q->mtu;
@@ -587,7 +582,12 @@ static unsigned long tbf_find(struct Qdisc *sch, u32 classid)
 static void tbf_walk(struct Qdisc *sch, struct qdisc_walker *walker)
 {
 	if (!walker->stop) {
-		tc_qdisc_stats_dump(sch, 1, walker);
+		if (walker->count >= walker->skip)
+			if (walker->fn(sch, 1, walker) < 0) {
+				walker->stop = 1;
+				return;
+			}
+		walker->count++;
 	}
 }
 
@@ -614,7 +614,6 @@ static struct Qdisc_ops tbf_qdisc_ops __read_mostly = {
 	.dump		=	tbf_dump,
 	.owner		=	THIS_MODULE,
 };
-MODULE_ALIAS_NET_SCH("tbf");
 
 static int __init tbf_module_init(void)
 {
@@ -628,4 +627,3 @@ static void __exit tbf_module_exit(void)
 module_init(tbf_module_init)
 module_exit(tbf_module_exit)
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Token Bucket Filter qdisc");

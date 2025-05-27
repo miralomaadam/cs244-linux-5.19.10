@@ -459,11 +459,12 @@ static void qed_mcp_print_cpu_info(struct qed_hwfn *p_hwfn,
 static int
 _qed_mcp_cmd_and_union(struct qed_hwfn *p_hwfn,
 		       struct qed_ptt *p_ptt,
-		       struct qed_mcp_mb_params *p_mb_params)
+		       struct qed_mcp_mb_params *p_mb_params,
+		       u32 max_retries, u32 usecs)
 {
+	u32 cnt = 0, msecs = DIV_ROUND_UP(usecs, 1000);
 	struct qed_mcp_cmd_elem *p_cmd_elem;
 	u16 seq_num;
-	u32 cnt = 0;
 	int rc = 0;
 
 	/* Wait until the mailbox is non-occupied */
@@ -487,13 +488,12 @@ _qed_mcp_cmd_and_union(struct qed_hwfn *p_hwfn,
 		spin_unlock_bh(&p_hwfn->mcp_info->cmd_lock);
 
 		if (QED_MB_FLAGS_IS_SET(p_mb_params, CAN_SLEEP))
-			usleep_range(QED_MCP_RESP_ITER_US,
-				     QED_MCP_RESP_ITER_US * 2);
+			msleep(msecs);
 		else
-			udelay(QED_MCP_RESP_ITER_US);
-	} while (++cnt < QED_DRV_MB_MAX_RETRIES);
+			udelay(usecs);
+	} while (++cnt < max_retries);
 
-	if (cnt >= QED_DRV_MB_MAX_RETRIES) {
+	if (cnt >= max_retries) {
 		DP_NOTICE(p_hwfn,
 			  "The MFW mailbox is occupied by an uncompleted command. Failed to send command 0x%08x [param 0x%08x].\n",
 			  p_mb_params->cmd, p_mb_params->param);
@@ -520,10 +520,9 @@ _qed_mcp_cmd_and_union(struct qed_hwfn *p_hwfn,
 		 */
 
 		if (QED_MB_FLAGS_IS_SET(p_mb_params, CAN_SLEEP))
-			usleep_range(QED_MCP_RESP_ITER_US,
-				     QED_MCP_RESP_ITER_US * 2);
+			msleep(msecs);
 		else
-			udelay(QED_MCP_RESP_ITER_US);
+			udelay(usecs);
 
 		spin_lock_bh(&p_hwfn->mcp_info->cmd_lock);
 
@@ -537,9 +536,9 @@ _qed_mcp_cmd_and_union(struct qed_hwfn *p_hwfn,
 			goto err;
 
 		spin_unlock_bh(&p_hwfn->mcp_info->cmd_lock);
-	} while (++cnt < QED_DRV_MB_MAX_RETRIES);
+	} while (++cnt < max_retries);
 
-	if (cnt >= QED_DRV_MB_MAX_RETRIES) {
+	if (cnt >= max_retries) {
 		DP_NOTICE(p_hwfn,
 			  "The MFW failed to respond to command 0x%08x [param 0x%08x].\n",
 			  p_mb_params->cmd, p_mb_params->param);
@@ -565,8 +564,7 @@ _qed_mcp_cmd_and_union(struct qed_hwfn *p_hwfn,
 		   "MFW mailbox: response 0x%08x param 0x%08x [after %d.%03d ms]\n",
 		   p_mb_params->mcp_resp,
 		   p_mb_params->mcp_param,
-		   (cnt * QED_MCP_RESP_ITER_US) / 1000,
-		   (cnt * QED_MCP_RESP_ITER_US) % 1000);
+		   (cnt * usecs) / 1000, (cnt * usecs) % 1000);
 
 	/* Clear the sequence number from the MFW response */
 	p_mb_params->mcp_resp &= FW_MSG_CODE_MASK;
@@ -583,6 +581,8 @@ static int qed_mcp_cmd_and_union(struct qed_hwfn *p_hwfn,
 				 struct qed_mcp_mb_params *p_mb_params)
 {
 	size_t union_data_size = sizeof(union drv_union_data);
+	u32 max_retries = QED_DRV_MB_MAX_RETRIES;
+	u32 usecs = QED_MCP_RESP_ITER_US;
 
 	/* MCP not initialized */
 	if (!qed_mcp_is_init(p_hwfn)) {
@@ -606,7 +606,13 @@ static int qed_mcp_cmd_and_union(struct qed_hwfn *p_hwfn,
 		return -EINVAL;
 	}
 
-	return _qed_mcp_cmd_and_union(p_hwfn, p_ptt, p_mb_params);
+	if (QED_MB_FLAGS_IS_SET(p_mb_params, CAN_SLEEP)) {
+		max_retries = DIV_ROUND_UP(max_retries, 1000);
+		usecs *= 1000;
+	}
+
+	return _qed_mcp_cmd_and_union(p_hwfn, p_ptt, p_mb_params, max_retries,
+				      usecs);
 }
 
 static int _qed_mcp_cmd(struct qed_hwfn *p_hwfn,
@@ -761,34 +767,34 @@ static int qed_mcp_cancel_load_req(struct qed_hwfn *p_hwfn,
 	return rc;
 }
 
-#define BITMAP_IDX_FOR_CONFIG_QEDE	BIT(0)
-#define BITMAP_IDX_FOR_CONFIG_QED_SRIOV	BIT(1)
-#define BITMAP_IDX_FOR_CONFIG_QEDR	BIT(2)
-#define BITMAP_IDX_FOR_CONFIG_QEDF	BIT(4)
-#define BITMAP_IDX_FOR_CONFIG_QEDI	BIT(5)
-#define BITMAP_IDX_FOR_CONFIG_QED_LL2	BIT(6)
+#define CONFIG_QEDE_BITMAP_IDX		BIT(0)
+#define CONFIG_QED_SRIOV_BITMAP_IDX	BIT(1)
+#define CONFIG_QEDR_BITMAP_IDX		BIT(2)
+#define CONFIG_QEDF_BITMAP_IDX		BIT(4)
+#define CONFIG_QEDI_BITMAP_IDX		BIT(5)
+#define CONFIG_QED_LL2_BITMAP_IDX	BIT(6)
 
 static u32 qed_get_config_bitmap(void)
 {
 	u32 config_bitmap = 0x0;
 
 	if (IS_ENABLED(CONFIG_QEDE))
-		config_bitmap |= BITMAP_IDX_FOR_CONFIG_QEDE;
+		config_bitmap |= CONFIG_QEDE_BITMAP_IDX;
 
 	if (IS_ENABLED(CONFIG_QED_SRIOV))
-		config_bitmap |= BITMAP_IDX_FOR_CONFIG_QED_SRIOV;
+		config_bitmap |= CONFIG_QED_SRIOV_BITMAP_IDX;
 
 	if (IS_ENABLED(CONFIG_QED_RDMA))
-		config_bitmap |= BITMAP_IDX_FOR_CONFIG_QEDR;
+		config_bitmap |= CONFIG_QEDR_BITMAP_IDX;
 
 	if (IS_ENABLED(CONFIG_QED_FCOE))
-		config_bitmap |= BITMAP_IDX_FOR_CONFIG_QEDF;
+		config_bitmap |= CONFIG_QEDF_BITMAP_IDX;
 
 	if (IS_ENABLED(CONFIG_QED_ISCSI))
-		config_bitmap |= BITMAP_IDX_FOR_CONFIG_QEDI;
+		config_bitmap |= CONFIG_QEDI_BITMAP_IDX;
 
 	if (IS_ENABLED(CONFIG_QED_LL2))
-		config_bitmap |= BITMAP_IDX_FOR_CONFIG_QED_LL2;
+		config_bitmap |= CONFIG_QED_LL2_BITMAP_IDX;
 
 	return config_bitmap;
 }
@@ -3079,12 +3085,19 @@ int qed_mcp_nvm_read(struct qed_dev *cdev, u32 addr, u8 *p_buf, u32 len)
 					 DRV_MB_PARAM_NVM_LEN_OFFSET),
 					&resp, &resp_param,
 					&read_len,
-					(u32 *)(p_buf + offset), true);
+					(u32 *)(p_buf + offset), false);
 
 		if (rc || (resp != FW_MSG_CODE_NVM_OK)) {
 			DP_NOTICE(cdev, "MCP command rc = %d\n", rc);
 			break;
 		}
+
+		/* This can be a lengthy process, and it's possible scheduler
+		 * isn't preemptible. Sleep a bit to prevent CPU hogging.
+		 */
+		if (bytes_left % 0x1000 <
+		    (bytes_left - read_len) % 0x1000)
+			usleep_range(1000, 2000);
 
 		offset += read_len;
 		bytes_left -= read_len;
@@ -3301,9 +3314,7 @@ int qed_mcp_bist_nvm_get_num_images(struct qed_hwfn *p_hwfn,
 	if (rc)
 		return rc;
 
-	if (((rsp & FW_MSG_CODE_MASK) == FW_MSG_CODE_UNSUPPORTED))
-		rc = -EOPNOTSUPP;
-	else if (((rsp & FW_MSG_CODE_MASK) != FW_MSG_CODE_OK))
+	if (((rsp & FW_MSG_CODE_MASK) != FW_MSG_CODE_OK))
 		rc = -EINVAL;
 
 	return rc;
@@ -3358,7 +3369,6 @@ int qed_mcp_nvm_info_populate(struct qed_hwfn *p_hwfn)
 					     p_ptt, &nvm_info.num_images);
 	if (rc == -EOPNOTSUPP) {
 		DP_INFO(p_hwfn, "DRV_MSG_CODE_BIST_TEST is not supported\n");
-		nvm_info.num_images = 0;
 		goto out;
 	} else if (rc || !nvm_info.num_images) {
 		DP_ERR(p_hwfn, "Failed getting number of images\n");

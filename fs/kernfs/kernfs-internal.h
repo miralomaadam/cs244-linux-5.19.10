@@ -19,8 +19,6 @@
 #include <linux/kernfs.h>
 #include <linux/fs_context.h>
 
-extern rwlock_t kernfs_rename_lock;
-
 struct kernfs_iattrs {
 	kuid_t			ia_uid;
 	kgid_t			ia_gid;
@@ -49,10 +47,6 @@ struct kernfs_root {
 
 	wait_queue_head_t	deactivate_waitq;
 	struct rw_semaphore	kernfs_rwsem;
-	struct rw_semaphore	kernfs_iattr_rwsem;
-	struct rw_semaphore	kernfs_supers_rwsem;
-
-	struct rcu_head		rcu;
 };
 
 /* +1 to avoid triggering overflow warning when negating it */
@@ -64,16 +58,13 @@ struct kernfs_root {
  * kernfs_root - find out the kernfs_root a kernfs_node belongs to
  * @kn: kernfs_node of interest
  *
- * Return: the kernfs_root @kn belongs to.
+ * Return the kernfs_root @kn belongs to.
  */
-static inline struct kernfs_root *kernfs_root(const struct kernfs_node *kn)
+static inline struct kernfs_root *kernfs_root(struct kernfs_node *kn)
 {
-	const struct kernfs_node *knp;
 	/* if parent exists, it's always a dir; otherwise, @sd is a dir */
-	guard(rcu)();
-	knp = rcu_dereference(kn->__parent);
-	if (knp)
-		kn = knp;
+	if (kn->parent)
+		kn = kn->parent;
 	return kn->dir.root;
 }
 
@@ -101,32 +92,6 @@ struct kernfs_super_info {
 	struct list_head	node;
 };
 #define kernfs_info(SB) ((struct kernfs_super_info *)(SB->s_fs_info))
-
-static inline bool kernfs_root_is_locked(const struct kernfs_node *kn)
-{
-	return lockdep_is_held(&kernfs_root(kn)->kernfs_rwsem);
-}
-
-static inline const char *kernfs_rcu_name(const struct kernfs_node *kn)
-{
-	return rcu_dereference_check(kn->name, kernfs_root_is_locked(kn));
-}
-
-static inline struct kernfs_node *kernfs_parent(const struct kernfs_node *kn)
-{
-	/*
-	 * The kernfs_node::__parent remains valid within a RCU section. The kn
-	 * can be reparented (and renamed) which changes the entry. This can be
-	 * avoided by locking kernfs_root::kernfs_rwsem or kernfs_rename_lock.
-	 * Both locks can be used to obtain a reference on __parent. Once the
-	 * reference count reaches 0 then the node is about to be freed
-	 * and can not be renamed (or become a different parent) anymore.
-	 */
-	return rcu_dereference_check(kn->__parent,
-				     kernfs_root_is_locked(kn) ||
-				     lockdep_is_held(&kernfs_rename_lock) ||
-				     !atomic_read(&kn->count));
-}
 
 static inline struct kernfs_node *kernfs_dentry_node(struct dentry *dentry)
 {
@@ -160,13 +125,13 @@ extern struct kmem_cache *kernfs_node_cache, *kernfs_iattrs_cache;
 /*
  * inode.c
  */
-extern const struct xattr_handler * const kernfs_xattr_handlers[];
+extern const struct xattr_handler *kernfs_xattr_handlers[];
 void kernfs_evict_inode(struct inode *inode);
-int kernfs_iop_permission(struct mnt_idmap *idmap,
+int kernfs_iop_permission(struct user_namespace *mnt_userns,
 			  struct inode *inode, int mask);
-int kernfs_iop_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+int kernfs_iop_setattr(struct user_namespace *mnt_userns, struct dentry *dentry,
 		       struct iattr *iattr);
-int kernfs_iop_getattr(struct mnt_idmap *idmap,
+int kernfs_iop_getattr(struct user_namespace *mnt_userns,
 		       const struct path *path, struct kstat *stat,
 		       u32 request_mask, unsigned int query_flags);
 ssize_t kernfs_iop_listxattr(struct dentry *dentry, char *buf, size_t size);
@@ -192,7 +157,6 @@ struct kernfs_node *kernfs_new_node(struct kernfs_node *parent,
  */
 extern const struct file_operations kernfs_file_fops;
 
-bool kernfs_should_drain_open_files(struct kernfs_node *kn);
 void kernfs_drain_open_files(struct kernfs_node *kn);
 
 /*
@@ -200,8 +164,4 @@ void kernfs_drain_open_files(struct kernfs_node *kn);
  */
 extern const struct inode_operations kernfs_symlink_iops;
 
-/*
- * kernfs locks
- */
-extern struct kernfs_global_locks *kernfs_locks;
 #endif	/* __KERNFS_INTERNAL_H */

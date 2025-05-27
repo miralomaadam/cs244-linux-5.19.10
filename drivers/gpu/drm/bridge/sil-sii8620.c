@@ -6,7 +6,7 @@
  * Andrzej Hajda <a.hajda@samsung.com>
  */
 
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 
 #include <drm/bridge/mhl.h>
 #include <drm/drm_bridge.h>
@@ -2284,7 +2284,8 @@ static const struct drm_bridge_funcs sii8620_bridge_funcs = {
 	.mode_valid = sii8620_mode_valid,
 };
 
-static int sii8620_probe(struct i2c_client *client)
+static int sii8620_probe(struct i2c_client *client,
+			 const struct i2c_device_id *id)
 {
 	struct device *dev = &client->dev;
 	struct sii8620 *ctx;
@@ -2345,7 +2346,7 @@ static int sii8620_probe(struct i2c_client *client)
 	return 0;
 }
 
-static void sii8620_remove(struct i2c_client *client)
+static int sii8620_remove(struct i2c_client *client)
 {
 	struct sii8620 *ctx = i2c_get_clientdata(client);
 
@@ -2359,6 +2360,8 @@ static void sii8620_remove(struct i2c_client *client)
 		sii8620_cable_out(ctx);
 	}
 	drm_bridge_remove(&ctx->bridge);
+
+	return 0;
 }
 
 static const struct of_device_id sii8620_dt_match[] = {
@@ -2368,15 +2371,15 @@ static const struct of_device_id sii8620_dt_match[] = {
 MODULE_DEVICE_TABLE(of, sii8620_dt_match);
 
 static const struct i2c_device_id sii8620_id[] = {
-	{ "sii8620" },
-	{ }
+	{ "sii8620", 0 },
+	{ },
 };
 
 MODULE_DEVICE_TABLE(i2c, sii8620_id);
 static struct i2c_driver sii8620_driver = {
 	.driver = {
 		.name	= "sii8620",
-		.of_match_table = sii8620_dt_match,
+		.of_match_table = of_match_ptr(sii8620_dt_match),
 	},
 	.probe		= sii8620_probe,
 	.remove		= sii8620_remove,
@@ -2384,5 +2387,4 @@ static struct i2c_driver sii8620_driver = {
 };
 
 module_i2c_driver(sii8620_driver);
-MODULE_DESCRIPTION("Silicon Image SiI8620 HDMI/MHL bridge driver");
 MODULE_LICENSE("GPL v2");

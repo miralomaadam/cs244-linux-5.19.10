@@ -3,17 +3,16 @@
 # Makefile for ALSA
 #
 
-snd-usb-audio-y := 	card.o \
+snd-usb-audio-objs := 	card.o \
 			clock.o \
 			endpoint.o \
-			fcp.o \
 			format.o \
 			helper.o \
 			implicit.o \
 			mixer.o \
 			mixer_quirks.o \
 			mixer_scarlett.o \
-			mixer_scarlett2.o \
+			mixer_scarlett_gen2.o \
 			mixer_us16x08.o \
 			mixer_s1810c.o \
 			pcm.o \
@@ -23,10 +22,9 @@ snd-usb-audio-y := 	card.o \
 			stream.o \
 			validate.o
 
-snd-usb-audio-$(CONFIG_SND_USB_AUDIO_MIDI_V2) += midi2.o
 snd-usb-audio-$(CONFIG_SND_USB_AUDIO_USE_MEDIA_CONTROLLER) += media.o
 
-snd-usbmidi-lib-y := midi.o
+snd-usbmidi-lib-objs := midi.o
 
 # Toplevel Module Dependency
 obj-$(CONFIG_SND_USB_AUDIO) += snd-usb-audio.o snd-usbmidi-lib.o

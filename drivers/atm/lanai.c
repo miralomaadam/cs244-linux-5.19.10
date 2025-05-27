@@ -1792,7 +1792,7 @@ static inline void lanai_timed_poll_start(struct lanai_dev *lanai)
 
 static inline void lanai_timed_poll_stop(struct lanai_dev *lanai)
 {
-	timer_delete_sync(&lanai->timer);
+	del_timer_sync(&lanai->timer);
 }
 
 /* -------------------- INTERRUPT SERVICE: */

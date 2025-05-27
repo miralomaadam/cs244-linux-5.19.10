@@ -23,7 +23,7 @@ static void nft_osf_eval(const struct nft_expr *expr, struct nft_regs *regs,
 	struct nft_osf *priv = nft_expr_priv(expr);
 	u32 *dest = &regs->data[priv->dreg];
 	struct sk_buff *skb = pkt->skb;
-	char os_match[NFT_OSF_MAXGENRELEN];
+	char os_match[NFT_OSF_MAXGENRELEN + 1];
 	const struct tcphdr *tcp;
 	struct nf_osf_data data;
 	struct tcphdr _tcph;
@@ -45,15 +45,15 @@ static void nft_osf_eval(const struct nft_expr *expr, struct nft_regs *regs,
 	}
 
 	if (!nf_osf_find(skb, nf_osf_fingers, priv->ttl, &data)) {
-		strscpy_pad((char *)dest, "unknown", NFT_OSF_MAXGENRELEN);
+		strncpy((char *)dest, "unknown", NFT_OSF_MAXGENRELEN);
 	} else {
 		if (priv->flags & NFT_OSF_F_VERSION)
 			snprintf(os_match, NFT_OSF_MAXGENRELEN, "%s:%s",
 				 data.genre, data.version);
 		else
-			strscpy(os_match, data.genre, NFT_OSF_MAXGENRELEN);
+			strlcpy(os_match, data.genre, NFT_OSF_MAXGENRELEN);
 
-		strscpy_pad((char *)dest, os_match, NFT_OSF_MAXGENRELEN);
+		strncpy((char *)dest, os_match, NFT_OSF_MAXGENRELEN);
 	}
 }
 
@@ -63,6 +63,7 @@ static int nft_osf_init(const struct nft_ctx *ctx,
 {
 	struct nft_osf *priv = nft_expr_priv(expr);
 	u32 flags;
+	int err;
 	u8 ttl;
 
 	if (!tb[NFTA_OSF_DREG])
@@ -82,20 +83,23 @@ static int nft_osf_init(const struct nft_ctx *ctx,
 		priv->flags = flags;
 	}
 
-	return nft_parse_register_store(ctx, tb[NFTA_OSF_DREG], &priv->dreg,
-					NULL, NFT_DATA_VALUE,
-					NFT_OSF_MAXGENRELEN);
+	err = nft_parse_register_store(ctx, tb[NFTA_OSF_DREG], &priv->dreg,
+				       NULL, NFT_DATA_VALUE,
+				       NFT_OSF_MAXGENRELEN);
+	if (err < 0)
+		return err;
+
+	return 0;
 }
 
-static int nft_osf_dump(struct sk_buff *skb,
-			const struct nft_expr *expr, bool reset)
+static int nft_osf_dump(struct sk_buff *skb, const struct nft_expr *expr)
 {
 	const struct nft_osf *priv = nft_expr_priv(expr);
 
 	if (nla_put_u8(skb, NFTA_OSF_TTL, priv->ttl))
 		goto nla_put_failure;
 
-	if (nla_put_u32(skb, NFTA_OSF_FLAGS, ntohl((__force __be32)priv->flags)))
+	if (nla_put_be32(skb, NFTA_OSF_FLAGS, ntohl(priv->flags)))
 		goto nla_put_failure;
 
 	if (nft_dump_register(skb, NFTA_OSF_DREG, priv->dreg))
@@ -108,7 +112,8 @@ nla_put_failure:
 }
 
 static int nft_osf_validate(const struct nft_ctx *ctx,
-			    const struct nft_expr *expr)
+			    const struct nft_expr *expr,
+			    const struct nft_data **data)
 {
 	unsigned int hooks;
 

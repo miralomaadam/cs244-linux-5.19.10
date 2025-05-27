@@ -5,7 +5,7 @@
 
 #include <linux/clk-provider.h>
 #include <linux/module.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 
 #include "ccu_common.h"
@@ -143,6 +143,17 @@ static struct ccu_common *sun50i_h6_r_ccu_clks[] = {
 	&w1_clk.common,
 };
 
+static struct ccu_common *sun50i_h616_r_ccu_clks[] = {
+	&r_apb1_clk.common,
+	&r_apb2_clk.common,
+	&r_apb1_twd_clk.common,
+	&r_apb2_i2c_clk.common,
+	&r_apb2_rsb_clk.common,
+	&r_apb1_ir_clk.common,
+	&r_apb1_rtc_clk.common,
+	&ir_clk.common,
+};
+
 static struct clk_hw_onecell_data sun50i_h6_r_hw_clks = {
 	.hws	= {
 		[CLK_AR100]		= &ar100_clk.common.hw,
@@ -179,7 +190,7 @@ static struct clk_hw_onecell_data sun50i_h616_r_hw_clks = {
 	.num	= CLK_NUMBER,
 };
 
-static const struct ccu_reset_map sun50i_h6_r_ccu_resets[] = {
+static struct ccu_reset_map sun50i_h6_r_ccu_resets[] = {
 	[RST_R_APB1_TIMER]	=  { 0x11c, BIT(16) },
 	[RST_R_APB1_TWD]	=  { 0x12c, BIT(16) },
 	[RST_R_APB1_PWM]	=  { 0x13c, BIT(16) },
@@ -190,7 +201,7 @@ static const struct ccu_reset_map sun50i_h6_r_ccu_resets[] = {
 	[RST_R_APB1_W1]		=  { 0x1ec, BIT(16) },
 };
 
-static const struct ccu_reset_map sun50i_h616_r_ccu_resets[] = {
+static struct ccu_reset_map sun50i_h616_r_ccu_resets[] = {
 	[RST_R_APB1_TWD]	=  { 0x12c, BIT(16) },
 	[RST_R_APB2_I2C]	=  { 0x19c, BIT(16) },
 	[RST_R_APB2_RSB]	=  { 0x1bc, BIT(16) },
@@ -208,8 +219,8 @@ static const struct sunxi_ccu_desc sun50i_h6_r_ccu_desc = {
 };
 
 static const struct sunxi_ccu_desc sun50i_h616_r_ccu_desc = {
-	.ccu_clks	= sun50i_h6_r_ccu_clks,
-	.num_ccu_clks	= ARRAY_SIZE(sun50i_h6_r_ccu_clks),
+	.ccu_clks	= sun50i_h616_r_ccu_clks,
+	.num_ccu_clks	= ARRAY_SIZE(sun50i_h616_r_ccu_clks),
 
 	.hw_clks	= &sun50i_h616_r_hw_clks,
 
@@ -244,7 +255,6 @@ static const struct of_device_id sun50i_h6_r_ccu_ids[] = {
 	},
 	{ }
 };
-MODULE_DEVICE_TABLE(of, sun50i_h6_r_ccu_ids);
 
 static struct platform_driver sun50i_h6_r_ccu_driver = {
 	.probe	= sun50i_h6_r_ccu_probe,
@@ -256,6 +266,5 @@ static struct platform_driver sun50i_h6_r_ccu_driver = {
 };
 module_platform_driver(sun50i_h6_r_ccu_driver);
 
-MODULE_IMPORT_NS("SUNXI_CCU");
-MODULE_DESCRIPTION("Support for the Allwinner H6 and H616 PRCM CCU");
+MODULE_IMPORT_NS(SUNXI_CCU);
 MODULE_LICENSE("GPL");

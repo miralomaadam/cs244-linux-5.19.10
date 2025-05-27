@@ -18,7 +18,6 @@
 
 #include "core.h"
 #include "bus.h"
-#include "fwvid.h"
 #include "debug.h"
 #include "fwil_types.h"
 #include "p2p.h"
@@ -234,12 +233,16 @@ static int brcmf_netdev_set_mac_address(struct net_device *ndev, void *addr)
 {
 	struct brcmf_if *ifp = netdev_priv(ndev);
 	struct sockaddr *sa = (struct sockaddr *)addr;
+	struct brcmf_pub *drvr = ifp->drvr;
 	int err;
 
 	brcmf_dbg(TRACE, "Enter, bsscfgidx=%d\n", ifp->bsscfgidx);
 
-	err = brcmf_c_set_cur_etheraddr(ifp, sa->sa_data);
-	if (err >= 0) {
+	err = brcmf_fil_iovar_data_set(ifp, "cur_etheraddr", sa->sa_data,
+				       ETH_ALEN);
+	if (err < 0) {
+		bphy_err(drvr, "Setting cur_etheraddr failed, %d\n", err);
+	} else {
 		brcmf_dbg(TRACE, "updated to %pM\n", sa->sa_data);
 		memcpy(ifp->mac_addr, sa->sa_data, ETH_ALEN);
 		eth_hw_addr_set(ifp->ndev, ifp->mac_addr);
@@ -293,7 +296,6 @@ static netdev_tx_t brcmf_netdev_start_xmit(struct sk_buff *skb,
 	struct brcmf_pub *drvr = ifp->drvr;
 	struct ethhdr *eh;
 	int head_delta;
-	unsigned int tx_bytes = skb->len;
 
 	brcmf_dbg(DATA, "Enter, bsscfgidx=%d\n", ifp->bsscfgidx);
 
@@ -327,8 +329,8 @@ static netdev_tx_t brcmf_netdev_start_xmit(struct sk_buff *skb,
 	if (skb_headroom(skb) < drvr->hdrlen || skb_header_cloned(skb)) {
 		head_delta = max_t(int, drvr->hdrlen - skb_headroom(skb), 0);
 
-		brcmf_dbg(INFO, "%s: %s headroom\n", brcmf_ifname(ifp),
-			  head_delta ? "insufficient" : "unmodifiable");
+		brcmf_dbg(INFO, "%s: insufficient headroom (%d)\n",
+			  brcmf_ifname(ifp), head_delta);
 		atomic_inc(&drvr->bus_if->stats.pktcowed);
 		ret = pskb_expand_head(skb, ALIGN(head_delta, NET_SKB_PAD), 0,
 				       GFP_ATOMIC);
@@ -336,7 +338,6 @@ static netdev_tx_t brcmf_netdev_start_xmit(struct sk_buff *skb,
 			bphy_err(drvr, "%s: failed to expand headroom\n",
 				 brcmf_ifname(ifp));
 			atomic_inc(&drvr->bus_if->stats.pktcow_failed);
-			dev_kfree_skb(skb);
 			goto done;
 		}
 	}
@@ -369,7 +370,7 @@ done:
 		ndev->stats.tx_dropped++;
 	} else {
 		ndev->stats.tx_packets++;
-		ndev->stats.tx_bytes += tx_bytes;
+		ndev->stats.tx_bytes += skb->len;
 	}
 
 	/* Return ok: we always eat the packet */
@@ -540,11 +541,6 @@ void brcmf_txfinalize(struct brcmf_if *ifp, struct sk_buff *txp, bool success)
 	struct ethhdr *eh;
 	u16 type;
 
-	if (!ifp) {
-		brcmu_pkt_buf_free_skb(txp);
-		return;
-	}
-
 	eh = (struct ethhdr *)(txp->data);
 	type = ntohs(eh->h_proto);
 
@@ -569,10 +565,10 @@ static void brcmf_ethtool_get_drvinfo(struct net_device *ndev,
 
 	if (drvr->revinfo.result == 0)
 		brcmu_dotrev_str(drvr->revinfo.driverrev, drev);
-	strscpy(info->driver, KBUILD_MODNAME, sizeof(info->driver));
-	strscpy(info->version, drev, sizeof(info->version));
-	strscpy(info->fw_version, drvr->fwver, sizeof(info->fw_version));
-	strscpy(info->bus_info, dev_name(drvr->bus_if->dev),
+	strlcpy(info->driver, KBUILD_MODNAME, sizeof(info->driver));
+	strlcpy(info->version, drev, sizeof(info->version));
+	strlcpy(info->fw_version, drvr->fwver, sizeof(info->fw_version));
+	strlcpy(info->bus_info, dev_name(drvr->bus_if->dev),
 		sizeof(info->bus_info));
 }
 
@@ -1142,8 +1138,7 @@ static int brcmf_revinfo_read(struct seq_file *s, void *data)
 	seq_printf(s, "vendorid: 0x%04x\n", ri->vendorid);
 	seq_printf(s, "deviceid: 0x%04x\n", ri->deviceid);
 	seq_printf(s, "radiorev: %s\n", brcmu_dotrev_str(ri->radiorev, drev));
-	seq_printf(s, "chip: %s (%s)\n", ri->chipname,
-		   brcmf_fwvid_vendor_name(bus_if->drvr));
+	seq_printf(s, "chip: %s\n", ri->chipname);
 	seq_printf(s, "chippkg: %u\n", ri->chippkg);
 	seq_printf(s, "corerev: %u\n", ri->corerev);
 	seq_printf(s, "boardid: 0x%04x\n", ri->boardid);
@@ -1189,6 +1184,7 @@ static ssize_t bus_reset_write(struct file *file, const char __user *user_buf,
 
 static const struct file_operations bus_reset_fops = {
 	.open	= simple_open,
+	.llseek	= no_llseek,
 	.write	= bus_reset_write,
 };
 
@@ -1339,12 +1335,6 @@ int brcmf_attach(struct device *dev)
 	/* Link to bus module */
 	drvr->hdrlen = 0;
 
-	ret = brcmf_fwvid_attach(drvr);
-	if (ret != 0) {
-		bphy_err(drvr, "brcmf_fwvid_attach failed\n");
-		goto fail;
-	}
-
 	/* Attach and link in the protocol */
 	ret = brcmf_proto_attach(drvr);
 	if (ret != 0) {
@@ -1352,16 +1342,12 @@ int brcmf_attach(struct device *dev)
 		goto fail;
 	}
 
-	/* attach firmware event handler */
-	ret = brcmf_fweh_attach(drvr);
-	if (ret != 0) {
-		bphy_err(drvr, "brcmf_fweh_attach failed\n");
-		goto fail;
-	}
-
 	/* Attach to events important for core code */
 	brcmf_fweh_register(drvr, BRCMF_E_PSM_WATCHDOG,
 			    brcmf_psm_watchdog_notify);
+
+	/* attach firmware event handler */
+	brcmf_fweh_attach(drvr);
 
 	ret = brcmf_bus_started(drvr, drvr->ops);
 	if (ret != 0) {
@@ -1416,8 +1402,7 @@ void brcmf_fw_crashed(struct device *dev)
 
 	brcmf_dev_coredump(dev);
 
-	if (drvr->bus_reset.func)
-		schedule_work(&drvr->bus_reset);
+	schedule_work(&drvr->bus_reset);
 }
 
 void brcmf_detach(struct device *dev)
@@ -1460,8 +1445,6 @@ void brcmf_detach(struct device *dev)
 		brcmf_cfg80211_detach(drvr->config);
 		drvr->config = NULL;
 	}
-
-	brcmf_fwvid_detach(drvr);
 }
 
 void brcmf_free(struct device *dev)
@@ -1501,10 +1484,8 @@ int brcmf_netdev_wait_pend8021x(struct brcmf_if *ifp)
 				 !brcmf_get_pend_8021x_cnt(ifp),
 				 MAX_WAIT_FOR_8021X_TX);
 
-	if (!err) {
+	if (!err)
 		bphy_err(drvr, "Timed out waiting for no pending 802.1x packets\n");
-		atomic_set(&ifp->pend_8021x_cnt, 0);
-	}
 
 	return !err;
 }

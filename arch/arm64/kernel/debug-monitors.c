@@ -28,7 +28,7 @@
 u8 debug_monitors_arch(void)
 {
 	return cpuid_feature_extract_unsigned_field(read_sanitised_ftr_reg(SYS_ID_AA64DFR0_EL1),
-						ID_AA64DFR0_EL1_DebugVer_SHIFT);
+						ID_AA64DFR0_DEBUGVER_SHIFT);
 }
 
 /*
@@ -303,6 +303,7 @@ static int call_break_hook(struct pt_regs *regs, unsigned long esr)
 {
 	struct break_hook *hook;
 	struct list_head *list;
+	int (*fn)(struct pt_regs *regs, unsigned long esr) = NULL;
 
 	list = user_mode(regs) ? &user_break_hook : &kernel_break_hook;
 
@@ -311,11 +312,13 @@ static int call_break_hook(struct pt_regs *regs, unsigned long esr)
 	 * entirely not preemptible, and we can use rcu list safely here.
 	 */
 	list_for_each_entry_rcu(hook, list, node) {
-		if ((esr_brk_comment(esr) & ~hook->mask) == hook->imm)
-			return hook->fn(regs, esr);
+		unsigned long comment = esr & ESR_ELx_BRK64_ISS_COMMENT_MASK;
+
+		if ((comment & ~hook->mask) == hook->imm)
+			fn = hook->fn;
 	}
 
-	return DBG_HOOK_ERROR;
+	return fn ? fn(regs, esr) : DBG_HOOK_ERROR;
 }
 NOKPROBE_SYMBOL(call_break_hook);
 
@@ -434,16 +437,6 @@ int kernel_active_single_step(void)
 	return mdscr_read() & DBG_MDSCR_SS;
 }
 NOKPROBE_SYMBOL(kernel_active_single_step);
-
-void kernel_rewind_single_step(struct pt_regs *regs)
-{
-	set_regs_spsr_ss(regs);
-}
-
-void kernel_fastforward_single_step(struct pt_regs *regs)
-{
-	clear_regs_spsr_ss(regs);
-}
 
 /* ptrace API */
 void user_enable_single_step(struct task_struct *task)

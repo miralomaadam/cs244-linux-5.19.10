@@ -22,7 +22,7 @@
 #include <linux/mmc/slot-gpio.h>
 
 #include <linux/sizes.h>
-#include <linux/unaligned.h>
+#include <asm/unaligned.h>
 
 #include "mvsdio.h"
 
@@ -464,7 +464,7 @@ static irqreturn_t mvsd_irq(int irq, void *dev)
 		struct mmc_command *cmd = mrq->cmd;
 		u32 err_status = 0;
 
-		timer_delete(&host->timer);
+		del_timer(&host->timer);
 		host->mrq = NULL;
 
 		host->intr_en &= MVSD_NOR_CARD_INT;
@@ -704,7 +704,7 @@ static int mvsd_probe(struct platform_device *pdev)
 	}
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
-		return irq;
+		return -ENXIO;
 
 	mmc = mmc_alloc_host(sizeof(struct mvsd_host), &pdev->dev);
 	if (!mmc) {
@@ -796,19 +796,21 @@ out:
 	return ret;
 }
 
-static void mvsd_remove(struct platform_device *pdev)
+static int mvsd_remove(struct platform_device *pdev)
 {
 	struct mmc_host *mmc = platform_get_drvdata(pdev);
 
 	struct mvsd_host *host = mmc_priv(mmc);
 
 	mmc_remove_host(mmc);
-	timer_delete_sync(&host->timer);
+	del_timer_sync(&host->timer);
 	mvsd_power_down(host);
 
 	if (!IS_ERR(host->clk))
 		clk_disable_unprepare(host->clk);
 	mmc_free_host(mmc);
+
+	return 0;
 }
 
 static const struct of_device_id mvsdio_dt_ids[] = {

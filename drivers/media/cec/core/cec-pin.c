@@ -4,9 +4,8 @@
  */
 
 #include <linux/delay.h>
-#include <linux/sched/types.h>
-#include <linux/seq_file.h>
 #include <linux/slab.h>
+#include <linux/sched/types.h>
 
 #include <media/cec-pin.h>
 #include "cec-pin-priv.h"
@@ -873,19 +872,19 @@ static enum hrtimer_restart cec_pin_timer(struct hrtimer *timer)
 		if (pin->wait_usecs > 150) {
 			pin->wait_usecs -= 100;
 			pin->timer_ts = ktime_add_us(ts, 100);
-			hrtimer_forward_now(timer, us_to_ktime(100));
+			hrtimer_forward_now(timer, ns_to_ktime(100000));
 			return HRTIMER_RESTART;
 		}
 		if (pin->wait_usecs > 100) {
 			pin->wait_usecs /= 2;
 			pin->timer_ts = ktime_add_us(ts, pin->wait_usecs);
 			hrtimer_forward_now(timer,
-					us_to_ktime(pin->wait_usecs));
+					ns_to_ktime(pin->wait_usecs * 1000));
 			return HRTIMER_RESTART;
 		}
 		pin->timer_ts = ktime_add_us(ts, pin->wait_usecs);
 		hrtimer_forward_now(timer,
-				    us_to_ktime(pin->wait_usecs));
+				    ns_to_ktime(pin->wait_usecs * 1000));
 		pin->wait_usecs = 0;
 		return HRTIMER_RESTART;
 	}
@@ -983,7 +982,7 @@ static enum hrtimer_restart cec_pin_timer(struct hrtimer *timer)
 		}
 		if (pin->state != CEC_ST_IDLE || pin->ops->enable_irq == NULL ||
 		    pin->enable_irq_failed || adap->is_configuring ||
-		    adap->is_configured || adap->monitor_all_cnt || !adap->monitor_pin_cnt)
+		    adap->is_configured || adap->monitor_all_cnt)
 			break;
 		/* Switch to interrupt mode */
 		atomic_set(&pin->work_irq_change, CEC_PIN_IRQ_ENABLE);
@@ -1020,12 +1019,13 @@ static enum hrtimer_restart cec_pin_timer(struct hrtimer *timer)
 	if (!adap->monitor_pin_cnt || usecs <= 150) {
 		pin->wait_usecs = 0;
 		pin->timer_ts = ktime_add_us(ts, usecs);
-		hrtimer_forward_now(timer, us_to_ktime(usecs));
+		hrtimer_forward_now(timer,
+				ns_to_ktime(usecs * 1000));
 		return HRTIMER_RESTART;
 	}
 	pin->wait_usecs = usecs - 100;
 	pin->timer_ts = ktime_add_us(ts, 100);
-	hrtimer_forward_now(timer, us_to_ktime(100));
+	hrtimer_forward_now(timer, ns_to_ktime(100000));
 	return HRTIMER_RESTART;
 }
 
@@ -1033,9 +1033,8 @@ static int cec_pin_thread_func(void *_adap)
 {
 	struct cec_adapter *adap = _adap;
 	struct cec_pin *pin = adap->pin;
+	bool irq_enabled = false;
 
-	pin->enabled_irq = false;
-	pin->enable_irq_failed = false;
 	for (;;) {
 		wait_event_interruptible(pin->kthread_waitq,
 					 kthread_should_stop() ||
@@ -1089,10 +1088,9 @@ static int cec_pin_thread_func(void *_adap)
 		switch (atomic_xchg(&pin->work_irq_change,
 				    CEC_PIN_IRQ_UNCHANGED)) {
 		case CEC_PIN_IRQ_DISABLE:
-			if (pin->enabled_irq) {
-				pin->ops->disable_irq(adap);
-				pin->enabled_irq = false;
-				pin->enable_irq_failed = false;
+			if (irq_enabled) {
+				call_void_pin_op(pin, disable_irq);
+				irq_enabled = false;
 			}
 			cec_pin_high(pin);
 			if (pin->state == CEC_ST_OFF)
@@ -1102,28 +1100,20 @@ static int cec_pin_thread_func(void *_adap)
 				      HRTIMER_MODE_REL);
 			break;
 		case CEC_PIN_IRQ_ENABLE:
-			if (pin->enabled_irq || !pin->ops->enable_irq ||
-			    pin->adap->devnode.unregistered)
+			if (irq_enabled)
 				break;
-			pin->enable_irq_failed = !pin->ops->enable_irq(adap);
+			pin->enable_irq_failed = !call_pin_op(pin, enable_irq);
 			if (pin->enable_irq_failed) {
 				cec_pin_to_idle(pin);
 				hrtimer_start(&pin->timer, ns_to_ktime(0),
 					      HRTIMER_MODE_REL);
 			} else {
-				pin->enabled_irq = true;
+				irq_enabled = true;
 			}
 			break;
 		default:
 			break;
 		}
-	}
-
-	if (pin->enabled_irq) {
-		pin->ops->disable_irq(pin->adap);
-		pin->enabled_irq = false;
-		pin->enable_irq_failed = false;
-		cec_pin_high(pin);
 	}
 	return 0;
 }
@@ -1225,9 +1215,7 @@ static void cec_pin_adap_status(struct cec_adapter *adap,
 	seq_printf(file, "cec pin: %d\n", call_pin_op(pin, read));
 	seq_printf(file, "cec pin events dropped: %u\n",
 		   pin->work_pin_events_dropped_cnt);
-	if (pin->ops->enable_irq)
-		seq_printf(file, "irq %s\n", pin->enabled_irq ? "enabled" :
-			   (pin->enable_irq_failed ? "failed" : "disabled"));
+	seq_printf(file, "irq failed: %d\n", pin->enable_irq_failed);
 	if (pin->timer_100us_overruns) {
 		seq_printf(file, "timer overruns > 100us: %u of %u\n",
 			   pin->timer_100us_overruns, pin->timer_cnt);
@@ -1317,7 +1305,7 @@ void cec_pin_changed(struct cec_adapter *adap, bool value)
 
 	cec_pin_update(pin, value, false);
 	if (!value && (adap->is_configuring || adap->is_configured ||
-		       adap->monitor_all_cnt || !adap->monitor_pin_cnt))
+		       adap->monitor_all_cnt))
 		atomic_set(&pin->work_irq_change, CEC_PIN_IRQ_DISABLE);
 }
 EXPORT_SYMBOL_GPL(cec_pin_changed);
@@ -1345,8 +1333,9 @@ struct cec_adapter *cec_pin_allocate_adapter(const struct cec_pin_ops *pin_ops,
 	if (pin == NULL)
 		return ERR_PTR(-ENOMEM);
 	pin->ops = pin_ops;
+	hrtimer_init(&pin->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	atomic_set(&pin->work_pin_num_events, 0);
-	hrtimer_setup(&pin->timer, cec_pin_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	pin->timer.function = cec_pin_timer;
 	init_waitqueue_head(&pin->kthread_waitq);
 	pin->tx_custom_low_usecs = CEC_TIM_CUSTOM_DEFAULT;
 	pin->tx_custom_high_usecs = CEC_TIM_CUSTOM_DEFAULT;

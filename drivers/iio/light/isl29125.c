@@ -54,7 +54,7 @@ struct isl29125_data {
 	/* Ensure timestamp is naturally aligned */
 	struct {
 		u16 chans[3];
-		aligned_s64 timestamp;
+		s64 timestamp __aligned(8);
 	} scan;
 };
 
@@ -181,7 +181,8 @@ static irqreturn_t isl29125_trigger_handler(int irq, void *p)
 	struct isl29125_data *data = iio_priv(indio_dev);
 	int i, j = 0;
 
-	iio_for_each_active_channel(indio_dev, i) {
+	for_each_set_bit(i, indio_dev->active_scan_mask,
+		indio_dev->masklength) {
 		int ret = i2c_smbus_read_word_data(data->client,
 			isl29125_regs[i].data);
 		if (ret < 0)
@@ -240,7 +241,8 @@ static const struct iio_buffer_setup_ops isl29125_buffer_setup_ops = {
 	.predisable = isl29125_buffer_predisable,
 };
 
-static int isl29125_probe(struct i2c_client *client)
+static int isl29125_probe(struct i2c_client *client,
+			   const struct i2c_device_id *id)
 {
 	struct isl29125_data *data;
 	struct iio_dev *indio_dev;
@@ -298,13 +300,15 @@ static int isl29125_powerdown(struct isl29125_data *data)
 		(data->conf1 & ~ISL29125_MODE_MASK) | ISL29125_MODE_PD);
 }
 
-static void isl29125_remove(struct i2c_client *client)
+static int isl29125_remove(struct i2c_client *client)
 {
 	struct iio_dev *indio_dev = i2c_get_clientdata(client);
 
 	iio_device_unregister(indio_dev);
 	iio_triggered_buffer_cleanup(indio_dev);
 	isl29125_powerdown(iio_priv(indio_dev));
+
+	return 0;
 }
 
 static int isl29125_suspend(struct device *dev)
@@ -326,7 +330,7 @@ static DEFINE_SIMPLE_DEV_PM_OPS(isl29125_pm_ops, isl29125_suspend,
 				isl29125_resume);
 
 static const struct i2c_device_id isl29125_id[] = {
-	{ "isl29125" },
+	{ "isl29125", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, isl29125_id);

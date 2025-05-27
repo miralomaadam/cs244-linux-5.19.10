@@ -4,7 +4,6 @@
  *
  * Copyright (C) 2004-2009 EMS Dr. Thomas Wuensche
  */
-#include <linux/ethtool.h>
 #include <linux/signal.h>
 #include <linux/slab.h>
 #include <linux/module.h>
@@ -335,14 +334,15 @@ static void ems_usb_rx_err(struct ems_usb *dev, struct ems_cpc_msg *msg)
 	struct net_device_stats *stats = &dev->netdev->stats;
 
 	skb = alloc_can_err_skb(dev->netdev, &cf);
+	if (skb == NULL)
+		return;
 
 	if (msg->type == CPC_MSG_TYPE_CAN_STATE) {
 		u8 state = msg->msg.can_state;
 
 		if (state & SJA1000_SR_BS) {
 			dev->can.state = CAN_STATE_BUS_OFF;
-			if (skb)
-				cf->can_id |= CAN_ERR_BUSOFF;
+			cf->can_id |= CAN_ERR_BUSOFF;
 
 			dev->can.can_stats.bus_off++;
 			can_bus_off(dev->netdev);
@@ -360,53 +360,44 @@ static void ems_usb_rx_err(struct ems_usb *dev, struct ems_cpc_msg *msg)
 
 		/* bus error interrupt */
 		dev->can.can_stats.bus_error++;
+		stats->rx_errors++;
 
-		if (skb) {
-			cf->can_id |= CAN_ERR_PROT | CAN_ERR_BUSERROR;
+		cf->can_id |= CAN_ERR_PROT | CAN_ERR_BUSERROR;
 
-			switch (ecc & SJA1000_ECC_MASK) {
-			case SJA1000_ECC_BIT:
-				cf->data[2] |= CAN_ERR_PROT_BIT;
-				break;
-			case SJA1000_ECC_FORM:
-				cf->data[2] |= CAN_ERR_PROT_FORM;
-				break;
-			case SJA1000_ECC_STUFF:
-				cf->data[2] |= CAN_ERR_PROT_STUFF;
-				break;
-			default:
-				cf->data[3] = ecc & SJA1000_ECC_SEG;
-				break;
-			}
+		switch (ecc & SJA1000_ECC_MASK) {
+		case SJA1000_ECC_BIT:
+			cf->data[2] |= CAN_ERR_PROT_BIT;
+			break;
+		case SJA1000_ECC_FORM:
+			cf->data[2] |= CAN_ERR_PROT_FORM;
+			break;
+		case SJA1000_ECC_STUFF:
+			cf->data[2] |= CAN_ERR_PROT_STUFF;
+			break;
+		default:
+			cf->data[3] = ecc & SJA1000_ECC_SEG;
+			break;
 		}
 
 		/* Error occurred during transmission? */
-		if ((ecc & SJA1000_ECC_DIR) == 0) {
-			stats->tx_errors++;
-			if (skb)
-				cf->data[2] |= CAN_ERR_PROT_TX;
-		} else {
-			stats->rx_errors++;
-		}
+		if ((ecc & SJA1000_ECC_DIR) == 0)
+			cf->data[2] |= CAN_ERR_PROT_TX;
 
-		if (skb && (dev->can.state == CAN_STATE_ERROR_WARNING ||
-			    dev->can.state == CAN_STATE_ERROR_PASSIVE)) {
+		if (dev->can.state == CAN_STATE_ERROR_WARNING ||
+		    dev->can.state == CAN_STATE_ERROR_PASSIVE) {
 			cf->can_id |= CAN_ERR_CRTL;
 			cf->data[1] = (txerr > rxerr) ?
 			    CAN_ERR_CRTL_TX_PASSIVE : CAN_ERR_CRTL_RX_PASSIVE;
 		}
 	} else if (msg->type == CPC_MSG_TYPE_OVERRUN) {
-		if (skb) {
-			cf->can_id |= CAN_ERR_CRTL;
-			cf->data[1] = CAN_ERR_CRTL_RX_OVERFLOW;
-		}
+		cf->can_id |= CAN_ERR_CRTL;
+		cf->data[1] = CAN_ERR_CRTL_RX_OVERFLOW;
 
 		stats->rx_over_errors++;
 		stats->rx_errors++;
 	}
 
-	if (skb)
-		netif_rx(skb);
+	netif_rx(skb);
 }
 
 /*
@@ -755,7 +746,7 @@ static netdev_tx_t ems_usb_start_xmit(struct sk_buff *skb, struct net_device *ne
 	size_t size = CPC_HEADER_SIZE + CPC_MSG_HEADER_LEN
 			+ sizeof(struct cpc_can_msg);
 
-	if (can_dev_dropped_skb(netdev, skb))
+	if (can_dropped_invalid_skb(netdev, skb))
 		return NETDEV_TX_OK;
 
 	/* create a URB, and a buffer for it, and copy the data to the URB */
@@ -888,12 +879,8 @@ static const struct net_device_ops ems_usb_netdev_ops = {
 	.ndo_change_mtu = can_change_mtu,
 };
 
-static const struct ethtool_ops ems_usb_ethtool_ops = {
-	.get_ts_info = ethtool_op_get_ts_info,
-};
-
 static const struct can_bittiming_const ems_usb_bittiming_const = {
-	.name = KBUILD_MODNAME,
+	.name = "ems_usb",
 	.tseg1_min = 1,
 	.tseg1_max = 16,
 	.tseg2_min = 1,
@@ -1003,7 +990,6 @@ static int ems_usb_probe(struct usb_interface *intf,
 	dev->can.ctrlmode_supported = CAN_CTRLMODE_3_SAMPLES;
 
 	netdev->netdev_ops = &ems_usb_netdev_ops;
-	netdev->ethtool_ops = &ems_usb_ethtool_ops;
 
 	netdev->flags |= IFF_ECHO; /* we support local echo */
 
@@ -1088,7 +1074,7 @@ static void ems_usb_disconnect(struct usb_interface *intf)
 
 /* usb specific object needed to register this driver with the usb subsystem */
 static struct usb_driver ems_usb_driver = {
-	.name = KBUILD_MODNAME,
+	.name = "ems_usb",
 	.probe = ems_usb_probe,
 	.disconnect = ems_usb_disconnect,
 	.id_table = ems_usb_table,

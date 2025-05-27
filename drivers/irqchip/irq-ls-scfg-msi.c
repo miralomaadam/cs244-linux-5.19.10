@@ -11,15 +11,14 @@
 #include <linux/module.h>
 #include <linux/msi.h>
 #include <linux/interrupt.h>
-#include <linux/iommu.h>
 #include <linux/irq.h>
 #include <linux/irqchip/chained_irq.h>
 #include <linux/irqdomain.h>
 #include <linux/of_irq.h>
 #include <linux/of_pci.h>
-#include <linux/platform_device.h>
-#include <linux/property.h>
+#include <linux/of_platform.h>
 #include <linux/spinlock.h>
+#include <linux/dma-iommu.h>
 
 #define MSI_IRQS_PER_MSIR	32
 #define MSI_MSIR_OFFSET		4
@@ -87,6 +86,8 @@ static void ls_scfg_msi_compose_msg(struct irq_data *data, struct msi_msg *msg)
 {
 	struct ls_scfg_msi *msi_data = irq_data_get_irq_chip_data(data);
 
+	msg->address_hi = upper_32_bits(msi_data->msiir_addr);
+	msg->address_lo = lower_32_bits(msi_data->msiir_addr);
 	msg->data = data->hwirq;
 
 	if (msi_affinity_flag) {
@@ -96,8 +97,7 @@ static void ls_scfg_msi_compose_msg(struct irq_data *data, struct msi_msg *msg)
 		msg->data |= cpumask_first(mask);
 	}
 
-	msi_msg_set_addr(irq_data_get_msi_desc(data), msg,
-			 msi_data->msiir_addr);
+	iommu_dma_compose_msi_msg(irq_data_get_msi_desc(data), msg);
 }
 
 static int ls_scfg_msi_set_affinity(struct irq_data *irq_data,
@@ -334,19 +334,23 @@ MODULE_DEVICE_TABLE(of, ls_scfg_msi_id);
 
 static int ls_scfg_msi_probe(struct platform_device *pdev)
 {
+	const struct of_device_id *match;
 	struct ls_scfg_msi *msi_data;
 	struct resource *res;
 	int i, ret;
+
+	match = of_match_device(ls_scfg_msi_id, &pdev->dev);
+	if (!match)
+		return -ENODEV;
 
 	msi_data = devm_kzalloc(&pdev->dev, sizeof(*msi_data), GFP_KERNEL);
 	if (!msi_data)
 		return -ENOMEM;
 
-	msi_data->cfg = (struct ls_scfg_msi_cfg *)device_get_match_data(&pdev->dev);
-	if (!msi_data->cfg)
-		return -ENODEV;
+	msi_data->cfg = (struct ls_scfg_msi_cfg *) match->data;
 
-	msi_data->regs = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	msi_data->regs = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(msi_data->regs)) {
 		dev_err(&pdev->dev, "failed to initialize 'regs'\n");
 		return PTR_ERR(msi_data->regs);
@@ -397,7 +401,7 @@ static int ls_scfg_msi_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void ls_scfg_msi_remove(struct platform_device *pdev)
+static int ls_scfg_msi_remove(struct platform_device *pdev)
 {
 	struct ls_scfg_msi *msi_data = platform_get_drvdata(pdev);
 	int i;
@@ -409,18 +413,21 @@ static void ls_scfg_msi_remove(struct platform_device *pdev)
 	irq_domain_remove(msi_data->parent);
 
 	platform_set_drvdata(pdev, NULL);
+
+	return 0;
 }
 
 static struct platform_driver ls_scfg_msi_driver = {
 	.driver = {
-		.name		= "ls-scfg-msi",
-		.of_match_table	= ls_scfg_msi_id,
+		.name = "ls-scfg-msi",
+		.of_match_table = ls_scfg_msi_id,
 	},
-	.probe		= ls_scfg_msi_probe,
-	.remove		= ls_scfg_msi_remove,
+	.probe = ls_scfg_msi_probe,
+	.remove = ls_scfg_msi_remove,
 };
 
 module_platform_driver(ls_scfg_msi_driver);
 
 MODULE_AUTHOR("Minghuan Lian <Minghuan.Lian@nxp.com>");
 MODULE_DESCRIPTION("Freescale Layerscape SCFG MSI controller driver");
+MODULE_LICENSE("GPL v2");

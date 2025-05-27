@@ -564,8 +564,10 @@ static int mlxreg_lc_event_handler(void *handle, enum mlxreg_hotplug_kind kind, 
 		 mlxreg_lc->data->slot, mlxreg_lc->state, kind, action);
 
 	mutex_lock(&mlxreg_lc->lock);
-	if (!(mlxreg_lc->state & MLXREG_LC_INITIALIZED))
-		goto mlxreg_lc_non_initialzed_exit;
+	if (!(mlxreg_lc->state & MLXREG_LC_INITIALIZED)) {
+		mutex_unlock(&mlxreg_lc->lock);
+		return 0;
+	}
 
 	switch (kind) {
 	case MLXREG_HOTPLUG_LC_SYNCED:
@@ -592,8 +594,8 @@ static int mlxreg_lc_event_handler(void *handle, enum mlxreg_hotplug_kind kind, 
 				/* In case line card is configured - enable it. */
 				if (mlxreg_lc->state & MLXREG_LC_CONFIGURED)
 					err = mlxreg_lc_enable_disable(mlxreg_lc, 1);
-
-				goto mlxreg_lc_enable_disable_exit;
+				mutex_unlock(&mlxreg_lc->lock);
+				return err;
 			}
 			err = mlxreg_lc_create_static_devices(mlxreg_lc, mlxreg_lc->main_devs,
 							      mlxreg_lc->main_devs_num);
@@ -625,10 +627,8 @@ static int mlxreg_lc_event_handler(void *handle, enum mlxreg_hotplug_kind kind, 
 		break;
 	}
 
-mlxreg_lc_enable_disable_exit:
 mlxreg_lc_power_on_off_fail:
 mlxreg_lc_create_static_devices_fail:
-mlxreg_lc_non_initialzed_exit:
 	mutex_unlock(&mlxreg_lc->lock);
 
 	return err;
@@ -825,9 +825,10 @@ static int mlxreg_lc_probe(struct platform_device *pdev)
 
 	mutex_init(&mlxreg_lc->lock);
 	/* Set event notification callback. */
-	data->notifier->user_handler = mlxreg_lc_event_handler;
-	data->notifier->handle = mlxreg_lc;
-
+	if (data->notifier) {
+		data->notifier->user_handler = mlxreg_lc_event_handler;
+		data->notifier->handle = mlxreg_lc;
+	}
 	data->hpdev.adapter = i2c_get_adapter(data->hpdev.nr);
 	if (!data->hpdev.adapter) {
 		dev_err(&pdev->dev, "Failed to get adapter for bus %d\n",
@@ -887,14 +888,16 @@ static int mlxreg_lc_probe(struct platform_device *pdev)
 	if (err)
 		goto mlxreg_lc_config_init_fail;
 
-	return 0;
+	return err;
 
 mlxreg_lc_config_init_fail:
 regcache_sync_fail:
 regmap_write_fail:
 devm_regmap_init_i2c_fail:
-	i2c_unregister_device(data->hpdev.client);
-	data->hpdev.client = NULL;
+	if (data->hpdev.client) {
+		i2c_unregister_device(data->hpdev.client);
+		data->hpdev.client = NULL;
+	}
 i2c_new_device_fail:
 	i2c_put_adapter(data->hpdev.adapter);
 	data->hpdev.adapter = NULL;
@@ -907,7 +910,7 @@ i2c_get_adapter_fail:
 	return err;
 }
 
-static void mlxreg_lc_remove(struct platform_device *pdev)
+static int mlxreg_lc_remove(struct platform_device *pdev)
 {
 	struct mlxreg_core_data *data = dev_get_platdata(&pdev->dev);
 	struct mlxreg_lc *mlxreg_lc = platform_get_drvdata(pdev);
@@ -921,7 +924,7 @@ static void mlxreg_lc_remove(struct platform_device *pdev)
 	 * is nothing to remove.
 	 */
 	if (!data->notifier || !data->notifier->handle)
-		return;
+		return 0;
 
 	/* Clear event notification callback and handle. */
 	data->notifier->user_handler = NULL;
@@ -940,6 +943,8 @@ static void mlxreg_lc_remove(struct platform_device *pdev)
 		i2c_put_adapter(data->hpdev.adapter);
 		data->hpdev.adapter = NULL;
 	}
+
+	return 0;
 }
 
 static struct platform_driver mlxreg_lc_driver = {

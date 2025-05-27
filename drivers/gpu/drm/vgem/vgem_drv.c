@@ -47,6 +47,7 @@
 
 #define DRIVER_NAME	"vgem"
 #define DRIVER_DESC	"Virtual GEM provider"
+#define DRIVER_DATE	"20120112"
 #define DRIVER_MAJOR	1
 #define DRIVER_MINOR	0
 
@@ -120,6 +121,7 @@ static const struct drm_driver vgem_driver = {
 
 	.name	= DRIVER_NAME,
 	.desc	= DRIVER_DESC,
+	.date	= DRIVER_DATE,
 	.major	= DRIVER_MAJOR,
 	.minor	= DRIVER_MINOR,
 };

@@ -16,7 +16,6 @@
 #include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/of.h>
-#include <linux/of_graph.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
 #include <linux/string.h>
@@ -710,7 +709,7 @@ int dpi_init_port(struct dss_device *dss, struct platform_device *pdev,
 	if (!dpi)
 		return -ENOMEM;
 
-	ep = of_graph_get_next_port_endpoint(port, NULL);
+	ep = of_get_next_child(port, NULL);
 	if (!ep)
 		return 0;
 

@@ -10,4 +10,3 @@ KVM for s390 systems
    s390-diag
    s390-pv
    s390-pv-boot
-   s390-pv-dump

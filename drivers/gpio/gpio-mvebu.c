@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * GPIO driver for Marvell SoCs
  *
@@ -7,6 +6,10 @@
  * Thomas Petazzoni <thomas.petazzoni@free-electrons.com>
  * Andrew Lunn <andrew@lunn.ch>
  * Sebastian Hesselbarth <sebastian.hesselbarth@gmail.com>
+ *
+ * This file is licensed under the terms of the GNU General Public
+ * License version 2.  This program is licensed "as is" without any
+ * warranty of any kind, whether express or implied.
  *
  * This driver is a fairly straightforward GPIO driver for the
  * complete family of Marvell EBU SoC platforms (Orion, Dove,
@@ -42,14 +45,12 @@
 #include <linux/irqchip/chained_irq.h>
 #include <linux/irqdomain.h>
 #include <linux/mfd/syscon.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
-#include <linux/property.h>
 #include <linux/pwm.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
-#include <linux/string_choices.h>
 
 /*
  * GPIO unit register offsets.
@@ -100,6 +101,7 @@ struct mvebu_pwm {
 	u32			 offset;
 	unsigned long		 clk_rate;
 	struct gpio_desc	*gpiod;
+	struct pwm_chip		 chip;
 	spinlock_t		 lock;
 	struct mvebu_gpio_chip	*mvchip;
 
@@ -298,12 +300,12 @@ static unsigned int mvebu_pwmreg_blink_off_duration(struct mvebu_pwm *mvpwm)
 /*
  * Functions implementing the gpio_chip methods
  */
-static int mvebu_gpio_set(struct gpio_chip *chip, unsigned int pin, int value)
+static void mvebu_gpio_set(struct gpio_chip *chip, unsigned int pin, int value)
 {
 	struct mvebu_gpio_chip *mvchip = gpiochip_get_data(chip);
 
-	return regmap_update_bits(mvchip->regs, GPIO_OUT_OFF + mvchip->offset,
-				  BIT(pin), value ? BIT(pin) : 0);
+	regmap_update_bits(mvchip->regs, GPIO_OUT_OFF + mvchip->offset,
+			   BIT(pin), value ? BIT(pin) : 0);
 }
 
 static int mvebu_gpio_get(struct gpio_chip *chip, unsigned int pin)
@@ -346,7 +348,7 @@ static int mvebu_gpio_direction_input(struct gpio_chip *chip, unsigned int pin)
 	 * Check with the pinctrl driver whether this pin is usable as
 	 * an input GPIO
 	 */
-	ret = pinctrl_gpio_direction_input(chip, pin);
+	ret = pinctrl_gpio_direction_input(chip->base + pin);
 	if (ret)
 		return ret;
 
@@ -366,7 +368,7 @@ static int mvebu_gpio_direction_output(struct gpio_chip *chip, unsigned int pin,
 	 * Check with the pinctrl driver whether this pin is usable as
 	 * an output GPIO
 	 */
-	ret = pinctrl_gpio_direction_output(chip, pin);
+	ret = pinctrl_gpio_direction_output(chip->base + pin);
 	if (ret)
 		return ret;
 
@@ -615,7 +617,7 @@ static const struct regmap_config mvebu_gpio_regmap_config = {
  */
 static struct mvebu_pwm *to_mvebu_pwm(struct pwm_chip *chip)
 {
-	return pwmchip_get_drvdata(chip);
+	return container_of(chip, struct mvebu_pwm, chip);
 }
 
 static int mvebu_pwm_request(struct pwm_chip *chip, struct pwm_device *pwm)
@@ -658,10 +660,9 @@ static void mvebu_pwm_free(struct pwm_chip *chip, struct pwm_device *pwm)
 	spin_unlock_irqrestore(&mvpwm->lock, flags);
 }
 
-static int mvebu_pwm_get_state(struct pwm_chip *chip,
-			       struct pwm_device *pwm,
-			       struct pwm_state *state)
-{
+static void mvebu_pwm_get_state(struct pwm_chip *chip,
+				struct pwm_device *pwm,
+				struct pwm_state *state) {
 
 	struct mvebu_pwm *mvpwm = to_mvebu_pwm(chip);
 	struct mvebu_gpio_chip *mvchip = mvpwm->mvchip;
@@ -695,8 +696,6 @@ static int mvebu_pwm_get_state(struct pwm_chip *chip,
 		state->enabled = false;
 
 	spin_unlock_irqrestore(&mvpwm->lock, flags);
-
-	return 0;
 }
 
 static int mvebu_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
@@ -757,6 +756,7 @@ static const struct pwm_ops mvebu_pwm_ops = {
 	.free = mvebu_pwm_free,
 	.get_state = mvebu_pwm_get_state,
 	.apply = mvebu_pwm_apply,
+	.owner = THIS_MODULE,
 };
 
 static void __maybe_unused mvebu_pwm_suspend(struct mvebu_gpio_chip *mvchip)
@@ -789,17 +789,12 @@ static int mvebu_pwm_probe(struct platform_device *pdev,
 {
 	struct device *dev = &pdev->dev;
 	struct mvebu_pwm *mvpwm;
-	struct pwm_chip *chip;
 	void __iomem *base;
 	u32 offset;
 	u32 set;
 
-	if (mvchip->soc_variant == MVEBU_GPIO_SOC_VARIANT_A8K) {
-		int ret = device_property_read_u32(dev, "marvell,pwm-offset",
-						   &offset);
-		if (ret < 0)
-			return 0;
-	} else {
+	if (of_device_is_compatible(mvchip->chip.of_node,
+				    "marvell,armada-370-gpio")) {
 		/*
 		 * There are only two sets of PWM configuration registers for
 		 * all the GPIO lines on those SoCs which this driver reserves
@@ -809,16 +804,21 @@ static int mvebu_pwm_probe(struct platform_device *pdev,
 		if (!platform_get_resource_byname(pdev, IORESOURCE_MEM, "pwm"))
 			return 0;
 		offset = 0;
+	} else if (mvchip->soc_variant == MVEBU_GPIO_SOC_VARIANT_A8K) {
+		int ret = of_property_read_u32(dev->of_node,
+					       "marvell,pwm-offset", &offset);
+		if (ret < 0)
+			return 0;
+	} else {
+		return 0;
 	}
 
 	if (IS_ERR(mvchip->clk))
 		return PTR_ERR(mvchip->clk);
 
-	chip = devm_pwmchip_alloc(dev, mvchip->chip.ngpio, sizeof(*mvpwm));
-	if (IS_ERR(chip))
-		return PTR_ERR(chip);
-	mvpwm = to_mvebu_pwm(chip);
-
+	mvpwm = devm_kzalloc(dev, sizeof(struct mvebu_pwm), GFP_KERNEL);
+	if (!mvpwm)
+		return -ENOMEM;
 	mvchip->mvpwm = mvpwm;
 	mvpwm->mvchip = mvchip;
 	mvpwm->offset = offset;
@@ -871,11 +871,13 @@ static int mvebu_pwm_probe(struct platform_device *pdev,
 		return -EINVAL;
 	}
 
-	chip->ops = &mvebu_pwm_ops;
+	mvpwm->chip.dev = dev;
+	mvpwm->chip.ops = &mvebu_pwm_ops;
+	mvpwm->chip.npwm = mvchip->chip.ngpio;
 
 	spin_lock_init(&mvpwm->lock);
 
-	return devm_pwmchip_add(dev, chip);
+	return pwmchip_add(&mvpwm->chip);
 }
 
 #ifdef CONFIG_DEBUG_FS
@@ -908,14 +910,14 @@ static void mvebu_gpio_dbg_show(struct seq_file *s, struct gpio_chip *chip)
 
 		if (is_out) {
 			seq_printf(s, " out %s %s\n",
-				   str_hi_lo(out & msk),
+				   out & msk ? "hi" : "lo",
 				   blink & msk ? "(blink )" : "");
 			continue;
 		}
 
 		seq_printf(s, " in  %s (act %s) - IRQ",
-			   str_hi_lo((data_in ^ in_pol) & msk),
-			   str_lo_hi(in_pol & msk));
+			   (data_in ^ in_pol) & msk  ? "hi" : "lo",
+			   in_pol & msk ? "lo" : "hi");
 		if (!((edg_msk | lvl_msk) & msk)) {
 			seq_puts(s, " disabled\n");
 			continue;
@@ -1003,7 +1005,7 @@ static int mvebu_gpio_suspend(struct platform_device *pdev, pm_message_t state)
 		BUG();
 	}
 
-	if (IS_REACHABLE(CONFIG_PWM))
+	if (IS_ENABLED(CONFIG_PWM))
 		mvebu_pwm_suspend(mvchip);
 
 	return 0;
@@ -1055,7 +1057,7 @@ static int mvebu_gpio_resume(struct platform_device *pdev)
 		BUG();
 	}
 
-	if (IS_REACHABLE(CONFIG_PWM))
+	if (IS_ENABLED(CONFIG_PWM))
 		mvebu_pwm_resume(mvchip);
 
 	return 0;
@@ -1107,22 +1109,16 @@ static int mvebu_gpio_probe_syscon(struct platform_device *pdev,
 	if (IS_ERR(mvchip->regs))
 		return PTR_ERR(mvchip->regs);
 
-	if (device_property_read_u32(&pdev->dev, "offset", &mvchip->offset))
+	if (of_property_read_u32(pdev->dev.of_node, "offset", &mvchip->offset))
 		return -EINVAL;
 
 	return 0;
 }
 
-static void mvebu_gpio_remove_irq_domain(void *data)
-{
-	struct irq_domain *domain = data;
-
-	irq_domain_remove(domain);
-}
-
 static int mvebu_gpio_probe(struct platform_device *pdev)
 {
 	struct mvebu_gpio_chip *mvchip;
+	const struct of_device_id *match;
 	struct device_node *np = pdev->dev.of_node;
 	struct irq_chip_generic *gc;
 	struct irq_chip_type *ct;
@@ -1132,7 +1128,11 @@ static int mvebu_gpio_probe(struct platform_device *pdev)
 	int i, cpu, id;
 	int err;
 
-	soc_variant = (unsigned long)device_get_match_data(&pdev->dev);
+	match = of_match_device(mvebu_gpio_of_match, &pdev->dev);
+	if (match)
+		soc_variant = (unsigned long) match->data;
+	else
+		soc_variant = MVEBU_GPIO_SOC_VARIANT_ORION;
 
 	/* Some gpio controllers do not provide irq support */
 	err = platform_irq_count(pdev);
@@ -1148,7 +1148,7 @@ static int mvebu_gpio_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, mvchip);
 
-	if (device_property_read_u32(&pdev->dev, "ngpios", &ngpios)) {
+	if (of_property_read_u32(pdev->dev.of_node, "ngpios", &ngpios)) {
 		dev_err(&pdev->dev, "Missing ngpios OF property\n");
 		return -ENODEV;
 	}
@@ -1173,7 +1173,7 @@ static int mvebu_gpio_probe(struct platform_device *pdev)
 	mvchip->chip.direction_input = mvebu_gpio_direction_input;
 	mvchip->chip.get = mvebu_gpio_get;
 	mvchip->chip.direction_output = mvebu_gpio_direction_output;
-	mvchip->chip.set_rv = mvebu_gpio_set;
+	mvchip->chip.set = mvebu_gpio_set;
 	if (have_irqs)
 		mvchip->chip.to_irq = mvebu_gpio_to_irq;
 	mvchip->chip.base = id * MVEBU_MAX_GPIO_PER_BANK;
@@ -1231,7 +1231,7 @@ static int mvebu_gpio_probe(struct platform_device *pdev)
 	devm_gpiochip_add_data(&pdev->dev, &mvchip->chip, mvchip);
 
 	/* Some MVEBU SoCs have simple PWM support for GPIO lines */
-	if (IS_REACHABLE(CONFIG_PWM)) {
+	if (IS_ENABLED(CONFIG_PWM)) {
 		err = mvebu_pwm_probe(pdev, mvchip, id);
 		if (err)
 			return err;
@@ -1246,13 +1246,9 @@ static int mvebu_gpio_probe(struct platform_device *pdev)
 	if (!mvchip->domain) {
 		dev_err(&pdev->dev, "couldn't allocate irq domain %s (DT).\n",
 			mvchip->chip.label);
-		return -ENODEV;
+		err = -ENODEV;
+		goto err_pwm;
 	}
-
-	err = devm_add_action_or_reset(&pdev->dev, mvebu_gpio_remove_irq_domain,
-				       mvchip->domain);
-	if (err)
-		return err;
 
 	err = irq_alloc_domain_generic_chips(
 	    mvchip->domain, ngpios, 2, np->name, handle_level_irq,
@@ -1260,7 +1256,7 @@ static int mvebu_gpio_probe(struct platform_device *pdev)
 	if (err) {
 		dev_err(&pdev->dev, "couldn't allocate irq chips %s (DT).\n",
 			mvchip->chip.label);
-		return err;
+		goto err_domain;
 	}
 
 	/*
@@ -1300,6 +1296,13 @@ static int mvebu_gpio_probe(struct platform_device *pdev)
 	}
 
 	return 0;
+
+err_domain:
+	irq_domain_remove(mvchip->domain);
+err_pwm:
+	pwmchip_remove(&mvchip->mvpwm->chip);
+
+	return err;
 }
 
 static struct platform_driver mvebu_gpio_driver = {

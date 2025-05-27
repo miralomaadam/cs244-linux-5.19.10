@@ -17,11 +17,10 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/overflow.h>
 #include <linux/platform_device.h>
-#include <linux/property.h>
 #include <linux/slab.h>
 #include <linux/sysfs.h>
 
@@ -456,9 +455,6 @@ static const struct xadc_ops xadc_zynq_ops = {
 	.interrupt_handler = xadc_zynq_interrupt_handler,
 	.update_alarm = xadc_zynq_update_alarm,
 	.type = XADC_TYPE_S7,
-	/* Temp in C = (val * 503.975) / 2**bits - 273.15 */
-	.temp_scale = 503975,
-	.temp_offset = 273150,
 };
 
 static const unsigned int xadc_axi_reg_offsets[] = {
@@ -569,9 +565,6 @@ static const struct xadc_ops xadc_7s_axi_ops = {
 	.interrupt_handler = xadc_axi_interrupt_handler,
 	.flags = XADC_FLAGS_BUFFERED | XADC_FLAGS_IRQ_OPTIONAL,
 	.type = XADC_TYPE_S7,
-	/* Temp in C = (val * 503.975) / 2**bits - 273.15 */
-	.temp_scale = 503975,
-	.temp_offset = 273150,
 };
 
 static const struct xadc_ops xadc_us_axi_ops = {
@@ -583,12 +576,6 @@ static const struct xadc_ops xadc_us_axi_ops = {
 	.interrupt_handler = xadc_axi_interrupt_handler,
 	.flags = XADC_FLAGS_BUFFERED | XADC_FLAGS_IRQ_OPTIONAL,
 	.type = XADC_TYPE_US,
-	/**
-	 * Values below are for UltraScale+ (SYSMONE4) using internal reference.
-	 * See https://docs.xilinx.com/v/u/en-US/ug580-ultrascale-sysmon
-	 */
-	.temp_scale = 509314,
-	.temp_offset = 280231,
 };
 
 static int _xadc_update_adc_reg(struct xadc *xadc, unsigned int reg,
@@ -625,17 +612,20 @@ static int xadc_update_scan_mode(struct iio_dev *indio_dev,
 	const unsigned long *mask)
 {
 	struct xadc *xadc = iio_priv(indio_dev);
-	size_t n;
+	size_t new_size, n;
 	void *data;
 
-	n = bitmap_weight(mask, iio_get_masklength(indio_dev));
+	n = bitmap_weight(mask, indio_dev->masklength);
 
-	data = devm_krealloc_array(indio_dev->dev.parent, xadc->data,
-				   n, sizeof(*xadc->data), GFP_KERNEL);
+	if (check_mul_overflow(n, sizeof(*xadc->data), &new_size))
+		return -ENOMEM;
+
+	data = devm_krealloc(indio_dev->dev.parent, xadc->data,
+			     new_size, GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
 
-	memset(data, 0, n * sizeof(*xadc->data));
+	memset(data, 0, new_size);
 	xadc->data = data;
 
 	return 0;
@@ -681,7 +671,8 @@ static irqreturn_t xadc_trigger_handler(int irq, void *p)
 		goto out;
 
 	j = 0;
-	iio_for_each_active_channel(indio_dev, i) {
+	for_each_set_bit(i, indio_dev->active_scan_mask,
+		indio_dev->masklength) {
 		chan = xadc_scan_index_to_channel(i);
 		xadc_read_adc_reg(xadc, chan, &xadc->data[j]);
 		j++;
@@ -956,7 +947,8 @@ static int xadc_read_raw(struct iio_dev *indio_dev,
 			*val2 = bits;
 			return IIO_VAL_FRACTIONAL_LOG2;
 		case IIO_TEMP:
-			*val = xadc->ops->temp_scale;
+			/* Temp in C = (val * 503.975) / 2**bits - 273.15 */
+			*val = 503975;
 			*val2 = bits;
 			return IIO_VAL_FRACTIONAL_LOG2;
 		default:
@@ -964,7 +956,7 @@ static int xadc_read_raw(struct iio_dev *indio_dev,
 		}
 	case IIO_CHAN_INFO_OFFSET:
 		/* Only the temperature channel has an offset */
-		*val = -((xadc->ops->temp_offset << bits) / xadc->ops->temp_scale);
+		*val = -((273150 << bits) / 503975);
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_SAMP_FREQ:
 		ret = xadc_read_samplerate(xadc);
@@ -1190,13 +1182,14 @@ static const struct of_device_id xadc_of_match_table[] = {
 };
 MODULE_DEVICE_TABLE(of, xadc_of_match_table);
 
-static int xadc_parse_dt(struct iio_dev *indio_dev, unsigned int *conf, int irq)
+static int xadc_parse_dt(struct iio_dev *indio_dev, struct device_node *np,
+	unsigned int *conf, int irq)
 {
 	struct device *dev = indio_dev->dev.parent;
 	struct xadc *xadc = iio_priv(indio_dev);
 	const struct iio_chan_spec *channel_templates;
 	struct iio_chan_spec *channels, *chan;
-	struct fwnode_handle *chan_node, *child;
+	struct device_node *chan_node, *child;
 	unsigned int max_channels;
 	unsigned int num_channels;
 	const char *external_mux;
@@ -1207,7 +1200,7 @@ static int xadc_parse_dt(struct iio_dev *indio_dev, unsigned int *conf, int irq)
 
 	*conf = 0;
 
-	ret = device_property_read_string(dev, "xlnx,external-mux", &external_mux);
+	ret = of_property_read_string(np, "xlnx,external-mux", &external_mux);
 	if (ret < 0 || strcasecmp(external_mux, "none") == 0)
 		xadc->external_mux_mode = XADC_EXTERNAL_MUX_NONE;
 	else if (strcasecmp(external_mux, "single") == 0)
@@ -1218,7 +1211,8 @@ static int xadc_parse_dt(struct iio_dev *indio_dev, unsigned int *conf, int irq)
 		return -EINVAL;
 
 	if (xadc->external_mux_mode != XADC_EXTERNAL_MUX_NONE) {
-		ret = device_property_read_u32(dev, "xlnx,external-mux-channel", &ext_mux_chan);
+		ret = of_property_read_u32(np, "xlnx,external-mux-channel",
+					&ext_mux_chan);
 		if (ret < 0)
 			return ret;
 
@@ -1245,39 +1239,41 @@ static int xadc_parse_dt(struct iio_dev *indio_dev, unsigned int *conf, int irq)
 		channel_templates = xadc_us_channels;
 		max_channels = ARRAY_SIZE(xadc_us_channels);
 	}
-	channels = devm_kmemdup_array(dev, channel_templates, max_channels,
-				      sizeof(*channel_templates), GFP_KERNEL);
+	channels = devm_kmemdup(dev, channel_templates,
+				sizeof(channels[0]) * max_channels, GFP_KERNEL);
 	if (!channels)
 		return -ENOMEM;
 
 	num_channels = 9;
 	chan = &channels[9];
 
-	chan_node = device_get_named_child_node(dev, "xlnx,channels");
-	fwnode_for_each_child_node(chan_node, child) {
-		if (num_channels >= max_channels) {
-			fwnode_handle_put(child);
-			break;
+	chan_node = of_get_child_by_name(np, "xlnx,channels");
+	if (chan_node) {
+		for_each_child_of_node(chan_node, child) {
+			if (num_channels >= max_channels) {
+				of_node_put(child);
+				break;
+			}
+
+			ret = of_property_read_u32(child, "reg", &reg);
+			if (ret || reg > 16)
+				continue;
+
+			if (of_property_read_bool(child, "xlnx,bipolar"))
+				chan->scan_type.sign = 's';
+
+			if (reg == 0) {
+				chan->scan_index = 11;
+				chan->address = XADC_REG_VPVN;
+			} else {
+				chan->scan_index = 15 + reg;
+				chan->address = XADC_REG_VAUX(reg - 1);
+			}
+			num_channels++;
+			chan++;
 		}
-
-		ret = fwnode_property_read_u32(child, "reg", &reg);
-		if (ret || reg > 16)
-			continue;
-
-		if (fwnode_property_read_bool(child, "xlnx,bipolar"))
-			chan->scan_type.sign = 's';
-
-		if (reg == 0) {
-			chan->scan_index = 11;
-			chan->address = XADC_REG_VPVN;
-		} else {
-			chan->scan_index = 15 + reg;
-			chan->address = XADC_REG_VAUX(reg - 1);
-		}
-		num_channels++;
-		chan++;
 	}
-	fwnode_handle_put(chan_node);
+	of_node_put(chan_node);
 
 	/* No IRQ => no events */
 	if (irq <= 0) {
@@ -1288,9 +1284,9 @@ static int xadc_parse_dt(struct iio_dev *indio_dev, unsigned int *conf, int irq)
 	}
 
 	indio_dev->num_channels = num_channels;
-	indio_dev->channels = devm_krealloc_array(dev, channels,
-						  num_channels, sizeof(*channels),
-						  GFP_KERNEL);
+	indio_dev->channels = devm_krealloc(dev, channels,
+					    sizeof(*channels) * num_channels,
+					    GFP_KERNEL);
 	/* If we can't resize the channels array, just use the original */
 	if (!indio_dev->channels)
 		indio_dev->channels = channels;
@@ -1303,6 +1299,13 @@ static const char * const xadc_type_names[] = {
 	[XADC_TYPE_US] = "xilinx-system-monitor",
 };
 
+static void xadc_clk_disable_unprepare(void *data)
+{
+	struct clk *clk = data;
+
+	clk_disable_unprepare(clk);
+}
+
 static void xadc_cancel_delayed_work(void *data)
 {
 	struct delayed_work *work = data;
@@ -1313,6 +1316,7 @@ static void xadc_cancel_delayed_work(void *data)
 static int xadc_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	const struct of_device_id *id;
 	const struct xadc_ops *ops;
 	struct iio_dev *indio_dev;
 	unsigned int bipolar_mask;
@@ -1322,9 +1326,14 @@ static int xadc_probe(struct platform_device *pdev)
 	int irq;
 	int i;
 
-	ops = device_get_match_data(dev);
-	if (!ops)
+	if (!dev->of_node)
+		return -ENODEV;
+
+	id = of_match_node(xadc_of_match_table, dev->of_node);
+	if (!id)
 		return -EINVAL;
+
+	ops = id->data;
 
 	irq = platform_get_irq_optional(pdev, 0);
 	if (irq < 0 &&
@@ -1336,7 +1345,7 @@ static int xadc_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	xadc = iio_priv(indio_dev);
-	xadc->ops = ops;
+	xadc->ops = id->data;
 	init_completion(&xadc->completion);
 	mutex_init(&xadc->mutex);
 	spin_lock_init(&xadc->lock);
@@ -1350,7 +1359,7 @@ static int xadc_probe(struct platform_device *pdev)
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->info = &xadc_info;
 
-	ret = xadc_parse_dt(indio_dev, &conf0, irq);
+	ret = xadc_parse_dt(indio_dev, dev->of_node, &conf0, irq);
 	if (ret)
 		return ret;
 
@@ -1374,9 +1383,18 @@ static int xadc_probe(struct platform_device *pdev)
 		}
 	}
 
-	xadc->clk = devm_clk_get_enabled(dev, NULL);
+	xadc->clk = devm_clk_get(dev, NULL);
 	if (IS_ERR(xadc->clk))
 		return PTR_ERR(xadc->clk);
+
+	ret = clk_prepare_enable(xadc->clk);
+	if (ret)
+		return ret;
+
+	ret = devm_add_action_or_reset(dev,
+				       xadc_clk_disable_unprepare, xadc->clk);
+	if (ret)
+		return ret;
 
 	/*
 	 * Make sure not to exceed the maximum samplerate since otherwise the
@@ -1432,6 +1450,28 @@ static int xadc_probe(struct platform_device *pdev)
 		bipolar_mask >> 16);
 	if (ret)
 		return ret;
+
+	/* Disable all alarms */
+	ret = xadc_update_adc_reg(xadc, XADC_REG_CONF1, XADC_CONF1_ALARM_MASK,
+				  XADC_CONF1_ALARM_MASK);
+	if (ret)
+		return ret;
+
+	/* Set thresholds to min/max */
+	for (i = 0; i < 16; i++) {
+		/*
+		 * Set max voltage threshold and both temperature thresholds to
+		 * 0xffff, min voltage threshold to 0.
+		 */
+		if (i % 8 < 4 || i == 7)
+			xadc->threshold[i] = 0xffff;
+		else
+			xadc->threshold[i] = 0;
+		ret = xadc_write_adc_reg(xadc, XADC_REG_THRESHOLD(i),
+			xadc->threshold[i]);
+		if (ret)
+			return ret;
+	}
 
 	/* Go to non-buffered mode */
 	xadc_postdisable(indio_dev);

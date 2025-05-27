@@ -9,7 +9,7 @@
 #include <linux/list.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
@@ -88,10 +88,8 @@ static int vpu_core_boot_done(struct vpu_core *core)
 
 		core->supported_instance_count = min(core->supported_instance_count, count);
 	}
-	if (core->supported_instance_count >= BITS_PER_TYPE(core->instance_mask))
-		core->supported_instance_count = BITS_PER_TYPE(core->instance_mask);
 	core->fw_version = fw_version;
-	vpu_core_set_state(core, VPU_CORE_ACTIVE);
+	core->state = VPU_CORE_ACTIVE;
 
 	return 0;
 }
@@ -174,26 +172,10 @@ int vpu_alloc_dma(struct vpu_core *core, struct vpu_buffer *buf)
 	return __vpu_alloc_dma(core->dev, buf);
 }
 
-void vpu_core_set_state(struct vpu_core *core, enum vpu_core_state state)
+static void vpu_core_check_hang(struct vpu_core *core)
 {
-	if (state != core->state)
-		vpu_trace(core->dev, "vpu core state change from %d to %d\n", core->state, state);
-	core->state = state;
-	if (core->state == VPU_CORE_DEINIT)
-		core->hang_mask = 0;
-}
-
-static void vpu_core_update_state(struct vpu_core *core)
-{
-	if (!vpu_iface_get_power_state(core)) {
-		if (core->request_count)
-			vpu_core_set_state(core, VPU_CORE_HANG);
-		else
-			vpu_core_set_state(core, VPU_CORE_DEINIT);
-
-	} else if (core->state == VPU_CORE_ACTIVE && core->hang_mask) {
-		vpu_core_set_state(core, VPU_CORE_HANG);
-	}
+	if (core->hang_mask)
+		core->state = VPU_CORE_HANG;
 }
 
 static struct vpu_core *vpu_core_find_proper_by_type(struct vpu_dev *vpu, u32 type)
@@ -206,13 +188,11 @@ static struct vpu_core *vpu_core_find_proper_by_type(struct vpu_dev *vpu, u32 ty
 		dev_dbg(c->dev, "instance_mask = 0x%lx, state = %d\n", c->instance_mask, c->state);
 		if (c->type != type)
 			continue;
-		mutex_lock(&c->lock);
-		vpu_core_update_state(c);
-		mutex_unlock(&c->lock);
 		if (c->state == VPU_CORE_DEINIT) {
 			core = c;
 			break;
 		}
+		vpu_core_check_hang(c);
 		if (c->state != VPU_CORE_ACTIVE)
 			continue;
 		if (c->request_count < request_count) {
@@ -256,7 +236,7 @@ static int vpu_core_register(struct device *dev, struct vpu_core *core)
 	if (vpu_core_is_exist(vpu, core))
 		return 0;
 
-	core->workqueue = alloc_ordered_workqueue("vpu", WQ_MEM_RECLAIM);
+	core->workqueue = alloc_workqueue("vpu", WQ_UNBOUND | WQ_MEM_RECLAIM, 1);
 	if (!core->workqueue) {
 		dev_err(core->dev, "fail to alloc workqueue\n");
 		return -ENOMEM;
@@ -277,7 +257,13 @@ static int vpu_core_register(struct device *dev, struct vpu_core *core)
 	}
 
 	list_add_tail(&core->list, &vpu->cores);
+
 	vpu_core_get_vpu(core);
+
+	if (vpu_iface_get_power_state(core))
+		ret = vpu_core_restore(core);
+	if (ret)
+		goto error;
 
 	return 0;
 error:
@@ -376,10 +362,7 @@ struct vpu_core *vpu_request_core(struct vpu_dev *vpu, enum vpu_core_type type)
 	pm_runtime_resume_and_get(core->dev);
 
 	if (core->state == VPU_CORE_DEINIT) {
-		if (vpu_iface_get_power_state(core))
-			ret = vpu_core_restore(core);
-		else
-			ret = vpu_core_boot(core, true);
+		ret = vpu_core_boot(core, true);
 		if (ret) {
 			pm_runtime_put_sync(core->dev);
 			mutex_unlock(&core->lock);
@@ -429,12 +412,6 @@ int vpu_inst_register(struct vpu_inst *inst)
 	}
 
 	mutex_lock(&core->lock);
-	if (core->state != VPU_CORE_ACTIVE) {
-		dev_err(core->dev, "vpu core is not active, state = %d\n", core->state);
-		ret = -EINVAL;
-		goto exit;
-	}
-
 	if (inst->id >= 0 && inst->id < core->supported_instance_count)
 		goto exit;
 
@@ -476,7 +453,7 @@ int vpu_inst_unregister(struct vpu_inst *inst)
 		vpu_core_release_instance(core, inst->id);
 		inst->id = VPU_INST_NULL_ID;
 	}
-	vpu_core_update_state(core);
+	vpu_core_check_hang(core);
 	if (core->state == VPU_CORE_HANG && !core->instance_mask) {
 		int err;
 
@@ -485,7 +462,7 @@ int vpu_inst_unregister(struct vpu_inst *inst)
 		err = vpu_core_sw_reset(core);
 		mutex_lock(&core->lock);
 		if (!err) {
-			vpu_core_set_state(core, VPU_CORE_ACTIVE);
+			core->state = VPU_CORE_ACTIVE;
 			core->hang_mask = 0;
 		}
 	}
@@ -635,14 +612,14 @@ static int vpu_core_probe(struct platform_device *pdev)
 	mutex_init(&core->cmd_lock);
 	init_completion(&core->cmp);
 	init_waitqueue_head(&core->ack_wq);
-	vpu_core_set_state(core, VPU_CORE_DEINIT);
+	core->state = VPU_CORE_DEINIT;
 
 	core->res = of_device_get_match_data(dev);
 	if (!core->res)
 		return -ENODEV;
 
 	core->type = core->res->type;
-	core->id = of_alias_get_id(dev->of_node, "vpu-core");
+	core->id = of_alias_get_id(dev->of_node, "vpu_core");
 	if (core->id < 0) {
 		dev_err(dev, "can't get vpu core id\n");
 		return core->id;
@@ -711,7 +688,7 @@ err_runtime_disable:
 	return ret;
 }
 
-static void vpu_core_remove(struct platform_device *pdev)
+static int vpu_core_remove(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct vpu_core *core = platform_get_drvdata(pdev);
@@ -730,6 +707,8 @@ static void vpu_core_remove(struct platform_device *pdev)
 	memunmap(core->rpc.virt);
 	mutex_destroy(&core->lock);
 	mutex_destroy(&core->cmd_lock);
+
+	return 0;
 }
 
 static int __maybe_unused vpu_core_runtime_resume(struct device *dev)
@@ -782,18 +761,33 @@ static int __maybe_unused vpu_core_resume(struct device *dev)
 	mutex_lock(&core->lock);
 	pm_runtime_resume_and_get(dev);
 	vpu_core_get_vpu(core);
+	if (core->state != VPU_CORE_SNAPSHOT)
+		goto exit;
 
-	if (core->request_count) {
-		if (!vpu_iface_get_power_state(core))
+	if (!vpu_iface_get_power_state(core)) {
+		if (!list_empty(&core->instances)) {
 			ret = vpu_core_boot(core, false);
-		else
-			ret = vpu_core_sw_reset(core);
-		if (ret) {
-			dev_err(core->dev, "resume fail\n");
-			vpu_core_set_state(core, VPU_CORE_HANG);
+			if (ret) {
+				dev_err(core->dev, "%s boot fail\n", __func__);
+				core->state = VPU_CORE_DEINIT;
+				goto exit;
+			}
+		} else {
+			core->state = VPU_CORE_DEINIT;
 		}
+	} else {
+		if (!list_empty(&core->instances)) {
+			ret = vpu_core_sw_reset(core);
+			if (ret) {
+				dev_err(core->dev, "%s sw_reset fail\n", __func__);
+				core->state = VPU_CORE_HANG;
+				goto exit;
+			}
+		}
+		core->state = VPU_CORE_ACTIVE;
 	}
-	vpu_core_update_state(core);
+
+exit:
 	pm_runtime_put_sync(dev);
 	mutex_unlock(&core->lock);
 
@@ -807,11 +801,18 @@ static int __maybe_unused vpu_core_suspend(struct device *dev)
 	int ret = 0;
 
 	mutex_lock(&core->lock);
-	if (core->request_count)
-		ret = vpu_core_snapshot(core);
+	if (core->state == VPU_CORE_ACTIVE) {
+		if (!list_empty(&core->instances)) {
+			ret = vpu_core_snapshot(core);
+			if (ret) {
+				mutex_unlock(&core->lock);
+				return ret;
+			}
+		}
+
+		core->state = VPU_CORE_SNAPSHOT;
+	}
 	mutex_unlock(&core->lock);
-	if (ret)
-		return ret;
 
 	vpu_core_cancel_work(core);
 
@@ -828,7 +829,7 @@ static const struct dev_pm_ops vpu_core_pm_ops = {
 
 static struct vpu_core_resources imx8q_enc = {
 	.type = VPU_CORE_TYPE_ENC,
-	.fwname = "amphion/vpu/vpu_fw_imx8_enc.bin",
+	.fwname = "vpu/vpu_fw_imx8_enc.bin",
 	.stride = 16,
 	.max_width = 1920,
 	.max_height = 1920,
@@ -843,7 +844,7 @@ static struct vpu_core_resources imx8q_enc = {
 
 static struct vpu_core_resources imx8q_dec = {
 	.type = VPU_CORE_TYPE_DEC,
-	.fwname = "amphion/vpu/vpu_fw_imx8_dec.bin",
+	.fwname = "vpu/vpu_fw_imx8_dec.bin",
 	.stride = 256,
 	.max_width = 8188,
 	.max_height = 8188,

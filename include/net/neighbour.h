@@ -29,7 +29,6 @@
 #include <linux/sysctl.h>
 #include <linux/workqueue.h>
 #include <net/rtnetlink.h>
-#include <net/neighbour_tables.h>
 
 /*
  * NUD stands for "neighbor unreachability detection"
@@ -49,7 +48,6 @@ enum {
 	NEIGH_VAR_RETRANS_TIME,
 	NEIGH_VAR_BASE_REACHABLE_TIME,
 	NEIGH_VAR_DELAY_PROBE_TIME,
-	NEIGH_VAR_INTERVAL_PROBE_TIME_MS,
 	NEIGH_VAR_GC_STALETIME,
 	NEIGH_VAR_QUEUE_LEN_BYTES,
 	NEIGH_VAR_PROXY_QLEN,
@@ -84,7 +82,6 @@ struct neigh_parms {
 	struct rcu_head rcu_head;
 
 	int	reachable_time;
-	u32	qlen;
 	int	data[NEIGH_VAR_DATA_MAX];
 	DECLARE_BITMAP(data_state, NEIGH_VAR_DATA_MAX);
 };
@@ -136,8 +133,7 @@ struct neigh_statistics {
 #define NEIGH_CACHE_STAT_INC(tbl, field) this_cpu_inc((tbl)->stats->field)
 
 struct neighbour {
-	struct hlist_node	hash;
-	struct hlist_node	dev_list;
+	struct neighbour __rcu	*next;
 	struct neigh_table	*tbl;
 	struct neigh_parms	*parms;
 	unsigned long		confirmed;
@@ -164,7 +160,7 @@ struct neighbour {
 	struct rcu_head		rcu;
 	struct net_device	*dev;
 	netdevice_tracker	dev_tracker;
-	u8			primary_key[];
+	u8			primary_key[0];
 } __randomize_layout;
 
 struct neigh_ops {
@@ -182,7 +178,7 @@ struct pneigh_entry {
 	netdevice_tracker	dev_tracker;
 	u32			flags;
 	u8			protocol;
-	u32			key[];
+	u8			key[];
 };
 
 /*
@@ -192,7 +188,7 @@ struct pneigh_entry {
 #define NEIGH_NUM_HASH_RND	4
 
 struct neigh_hash_table {
-	struct hlist_head	*hash_heads;
+	struct neighbour __rcu	**hash_buckets;
 	unsigned int		hash_shift;
 	__u32			hash_rnd[NEIGH_NUM_HASH_RND];
 	struct rcu_head		rcu;
@@ -238,6 +234,14 @@ struct neigh_table {
 	struct pneigh_entry	**phash_buckets;
 };
 
+enum {
+	NEIGH_ARP_TABLE = 0,
+	NEIGH_ND_TABLE = 1,
+	NEIGH_DN_TABLE = 2,
+	NEIGH_NR_TABLES,
+	NEIGH_LINK_TABLE = NEIGH_NR_TABLES /* Pseudo table for neigh_xmit */
+};
+
 static inline int neigh_parms_family(struct neigh_parms *p)
 {
 	return p->tbl->family;
@@ -270,11 +274,10 @@ static inline void *neighbour_priv(const struct neighbour *n)
 
 extern const struct nla_policy nda_policy[];
 
-#define neigh_for_each_in_bucket(pos, head) hlist_for_each_entry(pos, head, hash)
-#define neigh_for_each_in_bucket_rcu(pos, head) \
-	hlist_for_each_entry_rcu(pos, head, hash)
-#define neigh_for_each_in_bucket_safe(pos, tmp, head) \
-	hlist_for_each_entry_safe(pos, tmp, head, hash)
+static inline bool neigh_key_eq16(const struct neighbour *n, const void *pkey)
+{
+	return *(const u16 *)n->primary_key == *(const u16 *)pkey;
+}
 
 static inline bool neigh_key_eq32(const struct neighbour *n, const void *pkey)
 {
@@ -299,14 +302,17 @@ static inline struct neighbour *___neigh_lookup_noref(
 	const void *pkey,
 	struct net_device *dev)
 {
-	struct neigh_hash_table *nht = rcu_dereference(tbl->nht);
+	struct neigh_hash_table *nht = rcu_dereference_bh(tbl->nht);
 	struct neighbour *n;
 	u32 hash_val;
 
 	hash_val = hash(pkey, dev, nht->hash_rnd) >> (32 - nht->hash_shift);
-	neigh_for_each_in_bucket_rcu(n, &nht->hash_heads[hash_val])
+	for (n = rcu_dereference_bh(nht->hash_buckets[hash_val]);
+	     n != NULL;
+	     n = rcu_dereference_bh(n->next)) {
 		if (n->dev == dev && key_eq(n, pkey))
 			return n;
+	}
 
 	return NULL;
 }
@@ -333,6 +339,8 @@ void neigh_table_init(int index, struct neigh_table *tbl);
 int neigh_table_clear(int index, struct neigh_table *tbl);
 struct neighbour *neigh_lookup(struct neigh_table *tbl, const void *pkey,
 			       struct net_device *dev);
+struct neighbour *neigh_lookup_nodev(struct neigh_table *tbl, struct net *net,
+				     const void *pkey);
 struct neighbour *__neigh_create(struct neigh_table *tbl, const void *pkey,
 				 struct net_device *dev, bool want_ref);
 static inline struct neighbour *neigh_create(struct neigh_table *tbl,
@@ -347,7 +355,7 @@ int __neigh_event_send(struct neighbour *neigh, struct sk_buff *skb,
 int neigh_update(struct neighbour *neigh, const u8 *lladdr, u8 new, u32 flags,
 		 u32 nlmsg_pid);
 void __neigh_set_probe_once(struct neighbour *neigh);
-bool neigh_remove_one(struct neighbour *ndel);
+bool neigh_remove_one(struct neighbour *ndel, struct neigh_table *tbl);
 void neigh_changeaddr(struct neigh_table *tbl, struct net_device *dev);
 int neigh_ifdown(struct neigh_table *tbl, struct net_device *dev);
 int neigh_carrier_down(struct neigh_table *tbl, struct net_device *dev);
@@ -391,6 +399,8 @@ void neigh_for_each(struct neigh_table *tbl,
 void __neigh_for_each_release(struct neigh_table *tbl,
 			      int (*cb)(struct neighbour *));
 int neigh_xmit(int fam, struct net_device *, const void *, struct sk_buff *);
+void pneigh_for_each(struct neigh_table *tbl,
+		     void (*cb)(struct pneigh_entry *));
 
 struct neigh_seq_state {
 	struct seq_net_private p;
@@ -409,12 +419,12 @@ void *neigh_seq_start(struct seq_file *, loff_t *, struct neigh_table *,
 void *neigh_seq_next(struct seq_file *, void *, loff_t *);
 void neigh_seq_stop(struct seq_file *, void *);
 
-int neigh_proc_dointvec(const struct ctl_table *ctl, int write,
+int neigh_proc_dointvec(struct ctl_table *ctl, int write,
 			void *buffer, size_t *lenp, loff_t *ppos);
-int neigh_proc_dointvec_jiffies(const struct ctl_table *ctl, int write,
+int neigh_proc_dointvec_jiffies(struct ctl_table *ctl, int write,
 				void *buffer,
 				size_t *lenp, loff_t *ppos);
-int neigh_proc_dointvec_ms_jiffies(const struct ctl_table *ctl, int write,
+int neigh_proc_dointvec_ms_jiffies(struct ctl_table *ctl, int write,
 				   void *buffer, size_t *lenp, loff_t *ppos);
 
 int neigh_sysctl_register(struct net_device *dev, struct neigh_parms *p,
@@ -459,7 +469,7 @@ static __always_inline int neigh_event_send_probe(struct neighbour *neigh,
 
 	if (READ_ONCE(neigh->used) != now)
 		WRITE_ONCE(neigh->used, now);
-	if (!(READ_ONCE(neigh->nud_state) & (NUD_CONNECTED | NUD_DELAY | NUD_PROBE)))
+	if (!(neigh->nud_state & (NUD_CONNECTED | NUD_DELAY | NUD_PROBE)))
 		return __neigh_event_send(neigh, skb, immediate_ok);
 	return 0;
 }
@@ -536,7 +546,7 @@ static inline int neigh_output(struct neighbour *n, struct sk_buff *skb,
 	    READ_ONCE(hh->hh_len))
 		return neigh_hh_output(hh, skb);
 
-	return READ_ONCE(n->output)(n, skb);
+	return n->output(n, skb);
 }
 
 static inline struct neighbour *

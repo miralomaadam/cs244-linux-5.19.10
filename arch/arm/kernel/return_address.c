@@ -16,17 +16,17 @@ struct return_address_data {
 	void *addr;
 };
 
-static bool save_return_addr(void *d, unsigned long pc)
+static int save_return_addr(struct stackframe *frame, void *d)
 {
 	struct return_address_data *data = d;
 
 	if (!data->level) {
-		data->addr = (void *)pc;
+		data->addr = (void *)frame->pc;
 
-		return false;
+		return 1;
 	} else {
 		--data->level;
-		return true;
+		return 0;
 	}
 }
 
@@ -47,7 +47,6 @@ here:
 	frame.kr_cur = NULL;
 	frame.tsk = current;
 #endif
-	frame.ex_frame = false;
 
 	walk_stackframe(&frame, save_return_addr, &data);
 

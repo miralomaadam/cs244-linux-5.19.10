@@ -60,7 +60,6 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/kernel.h>
-#include <linux/platform_device.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/unistd.h>
@@ -76,6 +75,7 @@
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
 #include <linux/of_mdio.h>
+#include <linux/of_platform.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
@@ -754,8 +754,6 @@ static int gfar_of_init(struct platform_device *ofdev, struct net_device **pdev)
 		priv->device_flags |= FSL_GIANFAR_DEV_HAS_BUF_STASHING;
 
 	err = of_get_ethdev_address(np, dev);
-	if (err == -EPROBE_DEFER)
-		goto err_grp_init;
 	if (err) {
 		eth_hw_addr_random(dev);
 		dev_info(&ofdev->dev, "Using random MAC address: %pM\n", dev->dev_addr);
@@ -789,10 +787,10 @@ static int gfar_of_init(struct platform_device *ofdev, struct net_device **pdev)
 	else
 		priv->interface = gfar_get_interface(dev);
 
-	if (of_property_read_bool(np, "fsl,magic-packet"))
+	if (of_find_property(np, "fsl,magic-packet", NULL))
 		priv->device_flags |= FSL_GIANFAR_DEV_HAS_MAGIC_PACKET;
 
-	if (of_property_read_bool(np, "fsl,wake-on-filer"))
+	if (of_get_property(np, "fsl,wake-on-filer", NULL))
 		priv->device_flags |= FSL_GIANFAR_DEV_HAS_WAKE_ON_FILER;
 
 	priv->phy_node = of_parse_phandle(np, "phy-handle", 0);
@@ -1647,10 +1645,19 @@ static void gfar_configure_serdes(struct net_device *dev)
  */
 static int init_phy(struct net_device *dev)
 {
+	__ETHTOOL_DECLARE_LINK_MODE_MASK(mask) = { 0, };
 	struct gfar_private *priv = netdev_priv(dev);
 	phy_interface_t interface = priv->interface;
 	struct phy_device *phydev;
-	struct ethtool_keee edata;
+	struct ethtool_eee edata;
+
+	linkmode_set_bit_array(phy_10_100_features_array,
+			       ARRAY_SIZE(phy_10_100_features_array),
+			       mask);
+	linkmode_set_bit(ETHTOOL_LINK_MODE_Autoneg_BIT, mask);
+	linkmode_set_bit(ETHTOOL_LINK_MODE_MII_BIT, mask);
+	if (priv->device_flags & FSL_GIANFAR_DEV_HAS_GIGABIT)
+		linkmode_set_bit(ETHTOOL_LINK_MODE_1000baseT_Full_BIT, mask);
 
 	priv->oldlink = 0;
 	priv->oldspeed = 0;
@@ -1666,14 +1673,15 @@ static int init_phy(struct net_device *dev)
 	if (interface == PHY_INTERFACE_MODE_SGMII)
 		gfar_configure_serdes(dev);
 
-	if (!(priv->device_flags & FSL_GIANFAR_DEV_HAS_GIGABIT))
-		phy_set_max_speed(phydev, SPEED_100);
+	/* Remove any features not supported by the controller */
+	linkmode_and(phydev->supported, phydev->supported, mask);
+	linkmode_copy(phydev->advertising, phydev->supported);
 
 	/* Add support for flow control */
 	phy_support_asym_pause(phydev);
 
 	/* disable EEE autoneg, EEE not supported by eTSEC */
-	memset(&edata, 0, sizeof(struct ethtool_keee));
+	memset(&edata, 0, sizeof(struct ethtool_eee));
 	phy_ethtool_set_eee(phydev, &edata);
 
 	return 0;
@@ -1936,7 +1944,6 @@ static netdev_tx_t gfar_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		lstatus |= BD_LFLAG(TXBD_CRC | TXBD_READY) | skb_headlen(skb);
 	}
 
-	skb_tx_timestamp(skb);
 	netdev_tx_sent_queue(txq, bytes_sent);
 
 	gfar_wmb();
@@ -2018,7 +2025,7 @@ static int gfar_change_mtu(struct net_device *dev, int new_mtu)
 	if (dev->flags & IFF_UP)
 		stop_gfar(dev);
 
-	WRITE_ONCE(dev->mtu, new_mtu);
+	dev->mtu = new_mtu;
 
 	if (dev->flags & IFF_UP)
 		startup_gfar(dev);
@@ -2197,9 +2204,8 @@ static void gfar_clean_tx_ring(struct gfar_priv_tx_q *tx_queue)
 
 		if (unlikely(do_tstamp)) {
 			struct skb_shared_hwtstamps shhwtstamps;
-			__be64 *ns;
-
-			ns = (__be64 *)(((uintptr_t)skb->data + 0x10) & ~0x7UL);
+			u64 *ns = (u64 *)(((uintptr_t)skb->data + 0x10) &
+					  ~0x7UL);
 
 			memset(&shhwtstamps, 0, sizeof(shhwtstamps));
 			shhwtstamps.hwtstamp = ns_to_ktime(be64_to_cpu(*ns));
@@ -2462,7 +2468,7 @@ static void gfar_process_frame(struct net_device *ndev, struct sk_buff *skb)
 	/* Get receive timestamp from the skb */
 	if (priv->hwts_rx_en) {
 		struct skb_shared_hwtstamps *shhwtstamps = skb_hwtstamps(skb);
-		__be64 *ns = (__be64 *)skb->data;
+		u64 *ns = (u64 *) skb->data;
 
 		memset(shhwtstamps, 0, sizeof(*shhwtstamps));
 		shhwtstamps->hwtstamp = ns_to_ktime(be64_to_cpu(*ns));
@@ -3226,7 +3232,7 @@ static int gfar_probe(struct platform_device *ofdev)
 	/* Register for napi ...We are registering NAPI for each grp */
 	for (i = 0; i < priv->num_grps; i++) {
 		netif_napi_add(dev, &priv->gfargrp[i].napi_rx,
-			       gfar_poll_rx_sq);
+			       gfar_poll_rx_sq, NAPI_POLL_WEIGHT);
 		netif_napi_add_tx_weight(dev, &priv->gfargrp[i].napi_tx,
 					 gfar_poll_tx_sq, 2);
 	}
@@ -3357,7 +3363,7 @@ register_fail:
 	return err;
 }
 
-static void gfar_remove(struct platform_device *ofdev)
+static int gfar_remove(struct platform_device *ofdev)
 {
 	struct gfar_private *priv = platform_get_drvdata(ofdev);
 	struct device_node *np = ofdev->dev.of_node;
@@ -3374,6 +3380,8 @@ static void gfar_remove(struct platform_device *ofdev)
 	gfar_free_rx_queues(priv);
 	gfar_free_tx_queues(priv);
 	free_gfar_dev(priv);
+
+	return 0;
 }
 
 #ifdef CONFIG_PM

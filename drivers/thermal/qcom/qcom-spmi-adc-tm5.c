@@ -14,13 +14,11 @@
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/thermal.h>
-
-#include <linux/unaligned.h>
-
-#include "../thermal_hwmon.h"
+#include <asm-generic/unaligned.h>
 
 /*
  * Thermal monitoring block consists of 8 (ADC_TM5_NUM_CHANNELS) channels. Each
@@ -357,9 +355,9 @@ static irqreturn_t adc_tm5_gen2_isr(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-static int adc_tm5_get_temp(struct thermal_zone_device *tz, int *temp)
+static int adc_tm5_get_temp(void *data, int *temp)
 {
-	struct adc_tm5_channel *channel = thermal_zone_device_priv(tz);
+	struct adc_tm5_channel *channel = data;
 	int ret;
 
 	if (!channel || !channel->iio)
@@ -639,9 +637,9 @@ config_fail:
 	return ret;
 }
 
-static int adc_tm5_set_trips(struct thermal_zone_device *tz, int low, int high)
+static int adc_tm5_set_trips(void *data, int low, int high)
 {
-	struct adc_tm5_channel *channel = thermal_zone_device_priv(tz);
+	struct adc_tm5_channel *channel = data;
 	struct adc_tm5_chip *chip;
 	int ret;
 
@@ -660,7 +658,7 @@ static int adc_tm5_set_trips(struct thermal_zone_device *tz, int low, int high)
 	return ret;
 }
 
-static const struct thermal_zone_device_ops adc_tm5_thermal_ops = {
+static struct thermal_zone_of_device_ops adc_tm5_thermal_ops = {
 	.get_temp = adc_tm5_get_temp,
 	.set_trips = adc_tm5_set_trips,
 };
@@ -672,13 +670,14 @@ static int adc_tm5_register_tzd(struct adc_tm5_chip *adc_tm)
 
 	for (i = 0; i < adc_tm->nchannels; i++) {
 		adc_tm->channels[i].chip = adc_tm;
-		tzd = devm_thermal_of_zone_register(adc_tm->dev,
-						    adc_tm->channels[i].channel,
-						    &adc_tm->channels[i],
-						    &adc_tm5_thermal_ops);
+
+		tzd = devm_thermal_zone_of_sensor_register(adc_tm->dev,
+							   adc_tm->channels[i].channel,
+							   &adc_tm->channels[i],
+							   &adc_tm5_thermal_ops);
 		if (IS_ERR(tzd)) {
 			if (PTR_ERR(tzd) == -ENODEV) {
-				dev_dbg(adc_tm->dev, "thermal sensor on channel %d is not used\n",
+				dev_warn(adc_tm->dev, "thermal sensor on channel %d is not used\n",
 					 adc_tm->channels[i].channel);
 				continue;
 			}
@@ -688,7 +687,6 @@ static int adc_tm5_register_tzd(struct adc_tm5_chip *adc_tm)
 			return PTR_ERR(tzd);
 		}
 		adc_tm->channels[i].tzd = tzd;
-		devm_thermal_add_hwmon_sysfs(adc_tm->dev, tzd);
 	}
 
 	return 0;
@@ -827,11 +825,13 @@ static int adc_tm5_get_dt_channel_data(struct adc_tm5_chip *adc_tm,
 	}
 	channel->adc_channel = args.args[0];
 
-	channel->iio = devm_fwnode_iio_channel_get_by_name(adc_tm->dev,
-							   of_fwnode_handle(node), NULL);
-	if (IS_ERR(channel->iio))
-		return dev_err_probe(dev, PTR_ERR(channel->iio), "%s: error getting channel\n",
-				     name);
+	channel->iio = devm_of_iio_channel_get_by_name(adc_tm->dev, node, NULL);
+	if (IS_ERR(channel->iio)) {
+		ret = PTR_ERR(channel->iio);
+		if (ret != -EPROBE_DEFER)
+			dev_err(dev, "%s: error getting channel: %d\n", name, ret);
+		return ret;
+	}
 
 	ret = of_property_read_u32_array(node, "qcom,pre-scaling", varr, 2);
 	if (!ret) {
@@ -938,6 +938,7 @@ static const struct adc_tm5_data adc_tm5_gen2_data_pmic = {
 static int adc_tm5_get_dt_data(struct adc_tm5_chip *adc_tm, struct device_node *node)
 {
 	struct adc_tm5_channel *channels;
+	struct device_node *child;
 	u32 value;
 	int ret;
 	struct device *dev = adc_tm->dev;
@@ -981,10 +982,12 @@ static int adc_tm5_get_dt_data(struct adc_tm5_chip *adc_tm, struct device_node *
 		adc_tm->avg_samples = VADC_DEF_AVG_SAMPLES;
 	}
 
-	for_each_available_child_of_node_scoped(node, child) {
+	for_each_available_child_of_node(node, child) {
 		ret = adc_tm5_get_dt_channel_data(adc_tm, channels, child);
-		if (ret)
+		if (ret) {
+			of_node_put(child);
 			return ret;
+		}
 
 		channels++;
 	}
@@ -1018,12 +1021,16 @@ static int adc_tm5_probe(struct platform_device *pdev)
 	adc_tm->base = reg;
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0)
+	if (irq < 0) {
+		dev_err(dev, "get_irq failed: %d\n", irq);
 		return irq;
+	}
 
 	ret = adc_tm5_get_dt_data(adc_tm, node);
-	if (ret)
-		return dev_err_probe(dev, ret, "get dt data failed\n");
+	if (ret) {
+		dev_err(dev, "get dt data failed: %d\n", ret);
+		return ret;
+	}
 
 	ret = adc_tm->data->init(adc_tm);
 	if (ret) {

@@ -16,22 +16,20 @@ static struct dma_fence *msm_job_run(struct drm_sched_job *job)
 	struct msm_gem_submit *submit = to_msm_submit(job);
 	struct msm_fence_context *fctx = submit->ring->fctx;
 	struct msm_gpu *gpu = submit->gpu;
-	struct msm_drm_private *priv = gpu->dev->dev_private;
 	int i;
 
-	msm_fence_init(submit->hw_fence, fctx);
-
-	mutex_lock(&priv->lru.lock);
+	submit->hw_fence = msm_fence_alloc(fctx);
 
 	for (i = 0; i < submit->nr_bos; i++) {
-		struct drm_gem_object *obj = submit->bos[i].obj;
+		struct drm_gem_object *obj = &submit->bos[i].obj->base;
 
-		msm_gem_unpin_active(obj);
+		msm_gem_lock(obj);
+		msm_gem_unpin_vma_fenced(submit->bos[i].vma, fctx);
+		submit->bos[i].flags &= ~BO_VMA_PINNED;
+		msm_gem_unlock(obj);
 	}
 
-	submit->bos_pinned = false;
-
-	mutex_unlock(&priv->lru.lock);
+	pm_runtime_get_sync(&gpu->pdev->dev);
 
 	/* TODO move submit path over to using a per-ring lock.. */
 	mutex_lock(&gpu->lock);
@@ -39,6 +37,8 @@ static struct dma_fence *msm_job_run(struct drm_sched_job *job)
 	msm_gpu_submit(gpu, submit);
 
 	mutex_unlock(&gpu->lock);
+
+	pm_runtime_put(&gpu->pdev->dev);
 
 	return dma_fence_get(submit->hw_fence);
 }
@@ -59,18 +59,12 @@ static const struct drm_sched_backend_ops msm_sched_ops = {
 struct msm_ringbuffer *msm_ringbuffer_new(struct msm_gpu *gpu, int id,
 		void *memptrs, uint64_t memptrs_iova)
 {
-	struct drm_sched_init_args args = {
-		.ops = &msm_sched_ops,
-		.num_rqs = DRM_SCHED_PRIORITY_COUNT,
-		.credit_limit = num_hw_submissions,
-		.timeout = MAX_SCHEDULE_TIMEOUT,
-		.dev = gpu->dev->dev,
-	};
 	struct msm_ringbuffer *ring;
+	long sched_timeout;
 	char name[32];
 	int ret;
 
-	/* We assume everywhere that MSM_GPU_RINGBUFFER_SZ is a power of 2 */
+	/* We assume everwhere that MSM_GPU_RINGBUFFER_SZ is a power of 2 */
 	BUILD_BUG_ON(!is_power_of_2(MSM_GPU_RINGBUFFER_SZ));
 
 	ring = kzalloc(sizeof(*ring), GFP_KERNEL);
@@ -93,7 +87,6 @@ struct msm_ringbuffer *msm_ringbuffer_new(struct msm_gpu *gpu, int id,
 	}
 
 	msm_gem_object_set_name(ring->bo, "ring%d", id);
-	args.name = to_msm_bo(ring->bo)->name,
 
 	ring->end   = ring->start + (MSM_GPU_RINGBUFFER_SZ >> 2);
 	ring->next  = ring->start;
@@ -102,7 +95,12 @@ struct msm_ringbuffer *msm_ringbuffer_new(struct msm_gpu *gpu, int id,
 	ring->memptrs = memptrs;
 	ring->memptrs_iova = memptrs_iova;
 
-	ret = drm_sched_init(&ring->sched, &args);
+	 /* currently managing hangcheck ourselves: */
+	sched_timeout = MAX_SCHEDULE_TIMEOUT;
+
+	ret = drm_sched_init(&ring->sched, &msm_sched_ops,
+			num_hw_submissions, 0, sched_timeout,
+			NULL, NULL, to_msm_bo(ring->bo)->name, gpu->dev->dev);
 	if (ret) {
 		goto fail;
 	}

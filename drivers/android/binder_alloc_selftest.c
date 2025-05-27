@@ -72,10 +72,6 @@ enum buf_end_align_type {
 	 * buf1 ]|[ buf2 | buf2 | buf2 ][ ...
 	 */
 	NEXT_NEXT_UNALIGNED,
-	/**
-	 * @LOOP_END: The number of enum values in &buf_end_align_type.
-	 * It is used for controlling loop termination.
-	 */
 	LOOP_END,
 };
 
@@ -97,18 +93,18 @@ static bool check_buffer_pages_allocated(struct binder_alloc *alloc,
 					 struct binder_buffer *buffer,
 					 size_t size)
 {
-	unsigned long page_addr;
-	unsigned long end;
+	void __user *page_addr;
+	void __user *end;
 	int page_index;
 
-	end = PAGE_ALIGN(buffer->user_data + size);
+	end = (void __user *)PAGE_ALIGN((uintptr_t)buffer->user_data + size);
 	page_addr = buffer->user_data;
 	for (; page_addr < end; page_addr += PAGE_SIZE) {
-		page_index = (page_addr - alloc->vm_start) / PAGE_SIZE;
-		if (!alloc->pages[page_index] ||
-		    !list_empty(page_to_lru(alloc->pages[page_index]))) {
+		page_index = (page_addr - alloc->buffer) / PAGE_SIZE;
+		if (!alloc->pages[page_index].page_ptr ||
+		    !list_empty(&alloc->pages[page_index].lru)) {
 			pr_err("expect alloc but is %s at page index %d\n",
-			       alloc->pages[page_index] ?
+			       alloc->pages[page_index].page_ptr ?
 			       "lru" : "free", page_index);
 			return false;
 		}
@@ -123,7 +119,7 @@ static void binder_selftest_alloc_buf(struct binder_alloc *alloc,
 	int i;
 
 	for (i = 0; i < BUFFER_NUM; i++) {
-		buffers[i] = binder_alloc_new_buf(alloc, sizes[i], 0, 0, 0);
+		buffers[i] = binder_alloc_new_buf(alloc, sizes[i], 0, 0, 0, 0);
 		if (IS_ERR(buffers[i]) ||
 		    !check_buffer_pages_allocated(alloc, buffers[i],
 						  sizes[i])) {
@@ -148,10 +144,10 @@ static void binder_selftest_free_buf(struct binder_alloc *alloc,
 		 * if binder shrinker ran during binder_alloc_free_buf
 		 * calls above.
 		 */
-		if (list_empty(page_to_lru(alloc->pages[i]))) {
+		if (list_empty(&alloc->pages[i].lru)) {
 			pr_err_size_seq(sizes, seq);
 			pr_err("expect lru but is %s at page index %d\n",
-			       alloc->pages[i] ? "alloc" : "free", i);
+			       alloc->pages[i].page_ptr ? "alloc" : "free", i);
 			binder_selftest_failures++;
 		}
 	}
@@ -162,15 +158,15 @@ static void binder_selftest_free_page(struct binder_alloc *alloc)
 	int i;
 	unsigned long count;
 
-	while ((count = list_lru_count(&binder_freelist))) {
-		list_lru_walk(&binder_freelist, binder_alloc_free_page,
+	while ((count = list_lru_count(&binder_alloc_lru))) {
+		list_lru_walk(&binder_alloc_lru, binder_alloc_free_page,
 			      NULL, count);
 	}
 
 	for (i = 0; i < (alloc->buffer_size / PAGE_SIZE); i++) {
-		if (alloc->pages[i]) {
+		if (alloc->pages[i].page_ptr) {
 			pr_err("expect free but is %s at page index %d\n",
-			       list_empty(page_to_lru(alloc->pages[i])) ?
+			       list_empty(&alloc->pages[i].lru) ?
 			       "alloc" : "lru", i);
 			binder_selftest_failures++;
 		}
@@ -187,7 +183,7 @@ static void binder_selftest_alloc_free(struct binder_alloc *alloc,
 
 	/* Allocate from lru. */
 	binder_selftest_alloc_buf(alloc, buffers, sizes, seq);
-	if (list_lru_count(&binder_freelist))
+	if (list_lru_count(&binder_alloc_lru))
 		pr_err("lru list should be empty but is not\n");
 
 	binder_selftest_free_buf(alloc, buffers, sizes, seq, end);
@@ -291,7 +287,7 @@ void binder_selftest_alloc(struct binder_alloc *alloc)
 	if (!binder_selftest_run)
 		return;
 	mutex_lock(&binder_selftest_lock);
-	if (!binder_selftest_run || !alloc->mapped)
+	if (!binder_selftest_run || !alloc->vma_addr)
 		goto done;
 	pr_info("STARTED\n");
 	binder_selftest_alloc_offset(alloc, end_offset, 0);

@@ -19,7 +19,7 @@
 #include <linux/highmem.h>
 
 static DEFINE_IDA(fpga_mgr_ida);
-static const struct class fpga_mgr_class;
+static struct class *fpga_mgr_class;
 
 struct fpga_mgr_devres {
 	struct fpga_manager *mgr;
@@ -71,15 +71,6 @@ static inline int fpga_mgr_write_complete(struct fpga_manager *mgr,
 	}
 	mgr->state = FPGA_MGR_STATE_OPERATING;
 
-	return 0;
-}
-
-static inline int fpga_mgr_parse_header(struct fpga_manager *mgr,
-					struct fpga_image_info *info,
-					const char *buf, size_t count)
-{
-	if (mgr->mops->parse_header)
-		return mgr->mops->parse_header(mgr, info, buf, count);
 	return 0;
 }
 
@@ -145,141 +136,24 @@ void fpga_image_info_free(struct fpga_image_info *info)
 EXPORT_SYMBOL_GPL(fpga_image_info_free);
 
 /*
- * Call the low level driver's parse_header function with entire FPGA image
- * buffer on the input. This will set info->header_size and info->data_size.
- */
-static int fpga_mgr_parse_header_mapped(struct fpga_manager *mgr,
-					struct fpga_image_info *info,
-					const char *buf, size_t count)
-{
-	int ret;
-
-	mgr->state = FPGA_MGR_STATE_PARSE_HEADER;
-	ret = fpga_mgr_parse_header(mgr, info, buf, count);
-
-	if (info->header_size + info->data_size > count) {
-		dev_err(&mgr->dev, "Bitstream data outruns FPGA image\n");
-		ret = -EINVAL;
-	}
-
-	if (ret) {
-		dev_err(&mgr->dev, "Error while parsing FPGA image header\n");
-		mgr->state = FPGA_MGR_STATE_PARSE_HEADER_ERR;
-	}
-
-	return ret;
-}
-
-/*
- * Call the low level driver's parse_header function with first fragment of
- * scattered FPGA image on the input. If header fits first fragment,
- * parse_header will set info->header_size and info->data_size. If it is not,
- * parse_header will set desired size to info->header_size and -EAGAIN will be
- * returned.
- */
-static int fpga_mgr_parse_header_sg_first(struct fpga_manager *mgr,
-					  struct fpga_image_info *info,
-					  struct sg_table *sgt)
-{
-	struct sg_mapping_iter miter;
-	int ret;
-
-	mgr->state = FPGA_MGR_STATE_PARSE_HEADER;
-
-	sg_miter_start(&miter, sgt->sgl, sgt->nents, SG_MITER_FROM_SG);
-	if (sg_miter_next(&miter) &&
-	    miter.length >= info->header_size)
-		ret = fpga_mgr_parse_header(mgr, info, miter.addr, miter.length);
-	else
-		ret = -EAGAIN;
-	sg_miter_stop(&miter);
-
-	if (ret && ret != -EAGAIN) {
-		dev_err(&mgr->dev, "Error while parsing FPGA image header\n");
-		mgr->state = FPGA_MGR_STATE_PARSE_HEADER_ERR;
-	}
-
-	return ret;
-}
-
-/*
- * Copy scattered FPGA image fragments to temporary buffer and call the
- * low level driver's parse_header function. This should be called after
- * fpga_mgr_parse_header_sg_first() returned -EAGAIN. In case of success,
- * pointer to the newly allocated image header copy will be returned and
- * its size will be set into *ret_size. Returned buffer needs to be freed.
- */
-static void *fpga_mgr_parse_header_sg(struct fpga_manager *mgr,
-				      struct fpga_image_info *info,
-				      struct sg_table *sgt, size_t *ret_size)
-{
-	size_t len, new_header_size, header_size = 0;
-	char *new_buf, *buf = NULL;
-	int ret;
-
-	do {
-		new_header_size = info->header_size;
-		if (new_header_size <= header_size) {
-			dev_err(&mgr->dev, "Requested invalid header size\n");
-			ret = -EFAULT;
-			break;
-		}
-
-		new_buf = krealloc(buf, new_header_size, GFP_KERNEL);
-		if (!new_buf) {
-			ret = -ENOMEM;
-			break;
-		}
-
-		buf = new_buf;
-
-		len = sg_pcopy_to_buffer(sgt->sgl, sgt->nents,
-					 buf + header_size,
-					 new_header_size - header_size,
-					 header_size);
-		if (len != new_header_size - header_size) {
-			ret = -EFAULT;
-			break;
-		}
-
-		header_size = new_header_size;
-		ret = fpga_mgr_parse_header(mgr, info, buf, header_size);
-	} while (ret == -EAGAIN);
-
-	if (ret) {
-		dev_err(&mgr->dev, "Error while parsing FPGA image header\n");
-		mgr->state = FPGA_MGR_STATE_PARSE_HEADER_ERR;
-		kfree(buf);
-		buf = ERR_PTR(ret);
-	}
-
-	*ret_size = header_size;
-
-	return buf;
-}
-
-/*
- * Call the low level driver's write_init function. This will do the
+ * Call the low level driver's write_init function.  This will do the
  * device-specific things to get the FPGA into the state where it is ready to
- * receive an FPGA image. The low level driver gets to see at least first
- * info->header_size bytes in the buffer. If info->header_size is 0,
- * write_init will not get any bytes of image buffer.
+ * receive an FPGA image. The low level driver only gets to see the first
+ * initial_header_size bytes in the buffer.
  */
 static int fpga_mgr_write_init_buf(struct fpga_manager *mgr,
 				   struct fpga_image_info *info,
 				   const char *buf, size_t count)
 {
-	size_t header_size = info->header_size;
 	int ret;
 
 	mgr->state = FPGA_MGR_STATE_WRITE_INIT;
-
-	if (header_size > count)
-		ret = -EINVAL;
-	else if (!header_size)
+	if (!mgr->mops->initial_header_size) {
 		ret = fpga_mgr_write_init(mgr, info, NULL, 0);
-	else
+	} else {
+		count = min(mgr->mops->initial_header_size, count);
 		ret = fpga_mgr_write_init(mgr, info, buf, count);
+	}
 
 	if (ret) {
 		dev_err(&mgr->dev, "Error preparing FPGA for writing\n");
@@ -290,50 +164,39 @@ static int fpga_mgr_write_init_buf(struct fpga_manager *mgr,
 	return 0;
 }
 
-static int fpga_mgr_prepare_sg(struct fpga_manager *mgr,
-			       struct fpga_image_info *info,
-			       struct sg_table *sgt)
+static int fpga_mgr_write_init_sg(struct fpga_manager *mgr,
+				  struct fpga_image_info *info,
+				  struct sg_table *sgt)
 {
 	struct sg_mapping_iter miter;
 	size_t len;
 	char *buf;
 	int ret;
 
-	/* Short path. Low level driver don't care about image header. */
-	if (!mgr->mops->initial_header_size && !mgr->mops->parse_header)
+	if (!mgr->mops->initial_header_size)
 		return fpga_mgr_write_init_buf(mgr, info, NULL, 0);
 
 	/*
 	 * First try to use miter to map the first fragment to access the
 	 * header, this is the typical path.
 	 */
-	ret = fpga_mgr_parse_header_sg_first(mgr, info, sgt);
-	/* If 0, header fits first fragment, call write_init on it */
-	if (!ret) {
-		sg_miter_start(&miter, sgt->sgl, sgt->nents, SG_MITER_FROM_SG);
-		if (sg_miter_next(&miter)) {
-			ret = fpga_mgr_write_init_buf(mgr, info, miter.addr,
-						      miter.length);
-			sg_miter_stop(&miter);
-			return ret;
-		}
+	sg_miter_start(&miter, sgt->sgl, sgt->nents, SG_MITER_FROM_SG);
+	if (sg_miter_next(&miter) &&
+	    miter.length >= mgr->mops->initial_header_size) {
+		ret = fpga_mgr_write_init_buf(mgr, info, miter.addr,
+					      miter.length);
 		sg_miter_stop(&miter);
-	/*
-	 * If -EAGAIN, more sg buffer is needed,
-	 * otherwise an error has occurred.
-	 */
-	} else if (ret != -EAGAIN) {
 		return ret;
 	}
+	sg_miter_stop(&miter);
 
-	/*
-	 * Copy the fragments into temporary memory.
-	 * Copying is done inside fpga_mgr_parse_header_sg().
-	 */
-	buf = fpga_mgr_parse_header_sg(mgr, info, sgt, &len);
-	if (IS_ERR(buf))
-		return PTR_ERR(buf);
+	/* Otherwise copy the fragments into temporary memory. */
+	buf = kmalloc(mgr->mops->initial_header_size, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
 
+	len = sg_copy_to_buffer(sgt->sgl, sgt->nents, buf,
+				mgr->mops->initial_header_size);
 	ret = fpga_mgr_write_init_buf(mgr, info, buf, len);
 
 	kfree(buf);
@@ -364,7 +227,7 @@ static int fpga_mgr_buf_load_sg(struct fpga_manager *mgr,
 {
 	int ret;
 
-	ret = fpga_mgr_prepare_sg(mgr, info, sgt);
+	ret = fpga_mgr_write_init_sg(mgr, info, sgt);
 	if (ret)
 		return ret;
 
@@ -373,35 +236,17 @@ static int fpga_mgr_buf_load_sg(struct fpga_manager *mgr,
 	if (mgr->mops->write_sg) {
 		ret = fpga_mgr_write_sg(mgr, sgt);
 	} else {
-		size_t length, count = 0, data_size = info->data_size;
 		struct sg_mapping_iter miter;
 
 		sg_miter_start(&miter, sgt->sgl, sgt->nents, SG_MITER_FROM_SG);
-
-		if (mgr->mops->skip_header &&
-		    !sg_miter_skip(&miter, info->header_size)) {
-			ret = -EINVAL;
-			goto out;
-		}
-
 		while (sg_miter_next(&miter)) {
-			if (data_size)
-				length = min(miter.length, data_size - count);
-			else
-				length = miter.length;
-
-			ret = fpga_mgr_write(mgr, miter.addr, length);
+			ret = fpga_mgr_write(mgr, miter.addr, miter.length);
 			if (ret)
-				break;
-
-			count += length;
-			if (data_size && count >= data_size)
 				break;
 		}
 		sg_miter_stop(&miter);
 	}
 
-out:
 	if (ret) {
 		dev_err(&mgr->dev, "Error while writing image data to FPGA\n");
 		mgr->state = FPGA_MGR_STATE_WRITE_ERR;
@@ -417,21 +262,9 @@ static int fpga_mgr_buf_load_mapped(struct fpga_manager *mgr,
 {
 	int ret;
 
-	ret = fpga_mgr_parse_header_mapped(mgr, info, buf, count);
-	if (ret)
-		return ret;
-
 	ret = fpga_mgr_write_init_buf(mgr, info, buf, count);
 	if (ret)
 		return ret;
-
-	if (mgr->mops->skip_header) {
-		buf += info->header_size;
-		count -= info->header_size;
-	}
-
-	if (info->data_size)
-		count = info->data_size;
 
 	/*
 	 * Write the FPGA image to the FPGA.
@@ -571,8 +404,6 @@ static int fpga_mgr_firmware_load(struct fpga_manager *mgr,
  */
 int fpga_mgr_load(struct fpga_manager *mgr, struct fpga_image_info *info)
 {
-	info->header_size = mgr->mops->initial_header_size;
-
 	if (info->sgt)
 		return fpga_mgr_buf_load_sg(mgr, info, info->sgt);
 	if (info->buf && info->count)
@@ -592,10 +423,6 @@ static const char * const state_str[] = {
 	/* requesting FPGA image from firmware */
 	[FPGA_MGR_STATE_FIRMWARE_REQ] =		"firmware request",
 	[FPGA_MGR_STATE_FIRMWARE_REQ_ERR] =	"firmware request error",
-
-	/* Parse FPGA image header */
-	[FPGA_MGR_STATE_PARSE_HEADER] =		"parse header",
-	[FPGA_MGR_STATE_PARSE_HEADER_ERR] =	"parse header error",
 
 	/* Preparing FPGA to receive image */
 	[FPGA_MGR_STATE_WRITE_INIT] =		"write init",
@@ -664,16 +491,20 @@ static struct attribute *fpga_mgr_attrs[] = {
 };
 ATTRIBUTE_GROUPS(fpga_mgr);
 
-static struct fpga_manager *__fpga_mgr_get(struct device *mgr_dev)
+static struct fpga_manager *__fpga_mgr_get(struct device *dev)
 {
 	struct fpga_manager *mgr;
 
-	mgr = to_fpga_manager(mgr_dev);
+	mgr = to_fpga_manager(dev);
 
-	if (!try_module_get(mgr->mops_owner))
-		mgr = ERR_PTR(-ENODEV);
+	if (!try_module_get(dev->parent->driver->owner))
+		goto err_dev;
 
 	return mgr;
+
+err_dev:
+	put_device(dev);
+	return ERR_PTR(-ENODEV);
 }
 
 static int fpga_mgr_dev_match(struct device *dev, const void *data)
@@ -689,18 +520,12 @@ static int fpga_mgr_dev_match(struct device *dev, const void *data)
  */
 struct fpga_manager *fpga_mgr_get(struct device *dev)
 {
-	struct fpga_manager *mgr;
-	struct device *mgr_dev;
-
-	mgr_dev = class_find_device(&fpga_mgr_class, NULL, dev, fpga_mgr_dev_match);
+	struct device *mgr_dev = class_find_device(fpga_mgr_class, NULL, dev,
+						   fpga_mgr_dev_match);
 	if (!mgr_dev)
 		return ERR_PTR(-ENODEV);
 
-	mgr = __fpga_mgr_get(mgr_dev);
-	if (IS_ERR(mgr))
-		put_device(mgr_dev);
-
-	return mgr;
+	return __fpga_mgr_get(mgr_dev);
 }
 EXPORT_SYMBOL_GPL(fpga_mgr_get);
 
@@ -713,18 +538,13 @@ EXPORT_SYMBOL_GPL(fpga_mgr_get);
  */
 struct fpga_manager *of_fpga_mgr_get(struct device_node *node)
 {
-	struct fpga_manager *mgr;
-	struct device *mgr_dev;
+	struct device *dev;
 
-	mgr_dev = class_find_device_by_of_node(&fpga_mgr_class, node);
-	if (!mgr_dev)
+	dev = class_find_device_by_of_node(fpga_mgr_class, node);
+	if (!dev)
 		return ERR_PTR(-ENODEV);
 
-	mgr = __fpga_mgr_get(mgr_dev);
-	if (IS_ERR(mgr))
-		put_device(mgr_dev);
-
-	return mgr;
+	return __fpga_mgr_get(dev);
 }
 EXPORT_SYMBOL_GPL(of_fpga_mgr_get);
 
@@ -734,7 +554,7 @@ EXPORT_SYMBOL_GPL(of_fpga_mgr_get);
  */
 void fpga_mgr_put(struct fpga_manager *mgr)
 {
-	module_put(mgr->mops_owner);
+	module_put(mgr->dev.parent->driver->owner);
 	put_device(&mgr->dev);
 }
 EXPORT_SYMBOL_GPL(fpga_mgr_put);
@@ -773,10 +593,9 @@ void fpga_mgr_unlock(struct fpga_manager *mgr)
 EXPORT_SYMBOL_GPL(fpga_mgr_unlock);
 
 /**
- * __fpga_mgr_register_full - create and register an FPGA Manager device
+ * fpga_mgr_register_full - create and register an FPGA Manager device
  * @parent:	fpga manager device from pdev
  * @info:	parameters for fpga manager
- * @owner:	owner module containing the ops
  *
  * The caller of this function is responsible for calling fpga_mgr_unregister().
  * Using devm_fpga_mgr_register_full() instead is recommended.
@@ -784,8 +603,7 @@ EXPORT_SYMBOL_GPL(fpga_mgr_unlock);
  * Return: pointer to struct fpga_manager pointer or ERR_PTR()
  */
 struct fpga_manager *
-__fpga_mgr_register_full(struct device *parent, const struct fpga_manager_info *info,
-			 struct module *owner)
+fpga_mgr_register_full(struct device *parent, const struct fpga_manager_info *info)
 {
 	const struct fpga_manager_ops *mops = info->mops;
 	struct fpga_manager *mgr;
@@ -805,7 +623,7 @@ __fpga_mgr_register_full(struct device *parent, const struct fpga_manager_info *
 	if (!mgr)
 		return ERR_PTR(-ENOMEM);
 
-	id = ida_alloc(&fpga_mgr_ida, GFP_KERNEL);
+	id = ida_simple_get(&fpga_mgr_ida, 0, 0, GFP_KERNEL);
 	if (id < 0) {
 		ret = id;
 		goto error_kfree;
@@ -813,14 +631,12 @@ __fpga_mgr_register_full(struct device *parent, const struct fpga_manager_info *
 
 	mutex_init(&mgr->ref_mutex);
 
-	mgr->mops_owner = owner;
-
 	mgr->name = info->name;
 	mgr->mops = info->mops;
 	mgr->priv = info->priv;
 	mgr->compat_id = info->compat_id;
 
-	mgr->dev.class = &fpga_mgr_class;
+	mgr->dev.class = fpga_mgr_class;
 	mgr->dev.groups = mops->groups;
 	mgr->dev.parent = parent;
 	mgr->dev.of_node = parent->of_node;
@@ -846,21 +662,20 @@ __fpga_mgr_register_full(struct device *parent, const struct fpga_manager_info *
 	return mgr;
 
 error_device:
-	ida_free(&fpga_mgr_ida, id);
+	ida_simple_remove(&fpga_mgr_ida, id);
 error_kfree:
 	kfree(mgr);
 
 	return ERR_PTR(ret);
 }
-EXPORT_SYMBOL_GPL(__fpga_mgr_register_full);
+EXPORT_SYMBOL_GPL(fpga_mgr_register_full);
 
 /**
- * __fpga_mgr_register - create and register an FPGA Manager device
+ * fpga_mgr_register - create and register an FPGA Manager device
  * @parent:	fpga manager device from pdev
  * @name:	fpga manager name
  * @mops:	pointer to structure of fpga manager ops
  * @priv:	fpga manager private data
- * @owner:	owner module containing the ops
  *
  * The caller of this function is responsible for calling fpga_mgr_unregister().
  * Using devm_fpga_mgr_register() instead is recommended. This simple
@@ -871,8 +686,8 @@ EXPORT_SYMBOL_GPL(__fpga_mgr_register_full);
  * Return: pointer to struct fpga_manager pointer or ERR_PTR()
  */
 struct fpga_manager *
-__fpga_mgr_register(struct device *parent, const char *name,
-		    const struct fpga_manager_ops *mops, void *priv, struct module *owner)
+fpga_mgr_register(struct device *parent, const char *name,
+		  const struct fpga_manager_ops *mops, void *priv)
 {
 	struct fpga_manager_info info = { 0 };
 
@@ -880,9 +695,9 @@ __fpga_mgr_register(struct device *parent, const char *name,
 	info.mops = mops;
 	info.priv = priv;
 
-	return __fpga_mgr_register_full(parent, &info, owner);
+	return fpga_mgr_register_full(parent, &info);
 }
-EXPORT_SYMBOL_GPL(__fpga_mgr_register);
+EXPORT_SYMBOL_GPL(fpga_mgr_register);
 
 /**
  * fpga_mgr_unregister - unregister an FPGA manager
@@ -912,10 +727,9 @@ static void devm_fpga_mgr_unregister(struct device *dev, void *res)
 }
 
 /**
- * __devm_fpga_mgr_register_full - resource managed variant of fpga_mgr_register()
+ * devm_fpga_mgr_register_full - resource managed variant of fpga_mgr_register()
  * @parent:	fpga manager device from pdev
  * @info:	parameters for fpga manager
- * @owner:	owner module containing the ops
  *
  * Return:  fpga manager pointer on success, negative error code otherwise.
  *
@@ -923,8 +737,7 @@ static void devm_fpga_mgr_unregister(struct device *dev, void *res)
  * function will be called automatically when the managing device is detached.
  */
 struct fpga_manager *
-__devm_fpga_mgr_register_full(struct device *parent, const struct fpga_manager_info *info,
-			      struct module *owner)
+devm_fpga_mgr_register_full(struct device *parent, const struct fpga_manager_info *info)
 {
 	struct fpga_mgr_devres *dr;
 	struct fpga_manager *mgr;
@@ -933,7 +746,7 @@ __devm_fpga_mgr_register_full(struct device *parent, const struct fpga_manager_i
 	if (!dr)
 		return ERR_PTR(-ENOMEM);
 
-	mgr = __fpga_mgr_register_full(parent, info, owner);
+	mgr = fpga_mgr_register_full(parent, info);
 	if (IS_ERR(mgr)) {
 		devres_free(dr);
 		return mgr;
@@ -944,15 +757,14 @@ __devm_fpga_mgr_register_full(struct device *parent, const struct fpga_manager_i
 
 	return mgr;
 }
-EXPORT_SYMBOL_GPL(__devm_fpga_mgr_register_full);
+EXPORT_SYMBOL_GPL(devm_fpga_mgr_register_full);
 
 /**
- * __devm_fpga_mgr_register - resource managed variant of fpga_mgr_register()
+ * devm_fpga_mgr_register - resource managed variant of fpga_mgr_register()
  * @parent:	fpga manager device from pdev
  * @name:	fpga manager name
  * @mops:	pointer to structure of fpga manager ops
  * @priv:	fpga manager private data
- * @owner:	owner module containing the ops
  *
  * Return:  fpga manager pointer on success, negative error code otherwise.
  *
@@ -961,9 +773,8 @@ EXPORT_SYMBOL_GPL(__devm_fpga_mgr_register_full);
  * device is detached.
  */
 struct fpga_manager *
-__devm_fpga_mgr_register(struct device *parent, const char *name,
-			 const struct fpga_manager_ops *mops, void *priv,
-			 struct module *owner)
+devm_fpga_mgr_register(struct device *parent, const char *name,
+		       const struct fpga_manager_ops *mops, void *priv)
 {
 	struct fpga_manager_info info = { 0 };
 
@@ -971,34 +782,35 @@ __devm_fpga_mgr_register(struct device *parent, const char *name,
 	info.mops = mops;
 	info.priv = priv;
 
-	return __devm_fpga_mgr_register_full(parent, &info, owner);
+	return devm_fpga_mgr_register_full(parent, &info);
 }
-EXPORT_SYMBOL_GPL(__devm_fpga_mgr_register);
+EXPORT_SYMBOL_GPL(devm_fpga_mgr_register);
 
 static void fpga_mgr_dev_release(struct device *dev)
 {
 	struct fpga_manager *mgr = to_fpga_manager(dev);
 
-	ida_free(&fpga_mgr_ida, mgr->dev.id);
+	ida_simple_remove(&fpga_mgr_ida, mgr->dev.id);
 	kfree(mgr);
 }
-
-static const struct class fpga_mgr_class = {
-	.name = "fpga_manager",
-	.dev_groups = fpga_mgr_groups,
-	.dev_release = fpga_mgr_dev_release,
-};
 
 static int __init fpga_mgr_class_init(void)
 {
 	pr_info("FPGA manager framework\n");
 
-	return class_register(&fpga_mgr_class);
+	fpga_mgr_class = class_create(THIS_MODULE, "fpga_manager");
+	if (IS_ERR(fpga_mgr_class))
+		return PTR_ERR(fpga_mgr_class);
+
+	fpga_mgr_class->dev_groups = fpga_mgr_groups;
+	fpga_mgr_class->dev_release = fpga_mgr_dev_release;
+
+	return 0;
 }
 
 static void __exit fpga_mgr_class_exit(void)
 {
-	class_unregister(&fpga_mgr_class);
+	class_destroy(fpga_mgr_class);
 	ida_destroy(&fpga_mgr_ida);
 }
 

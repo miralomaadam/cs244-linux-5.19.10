@@ -10,7 +10,7 @@ description:
   See spi-peripheral-props.yaml for more info.
 
 maintainers:
-  - Vaishnav Achath <vaishnav.a@ti.com>
+  - Pratyush Yadav <p.yadav@ti.com>
 
 properties:
   # cdns,qspi-nor.yaml

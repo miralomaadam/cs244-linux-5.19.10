@@ -1140,7 +1140,7 @@ static int el3_close(struct net_device *dev)
 
 	link->open--;
 	netif_stop_queue(dev);
-	timer_delete_sync(&lp->media);
+	del_timer_sync(&lp->media);
 
 	return 0;
 }

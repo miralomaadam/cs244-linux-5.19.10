@@ -10,7 +10,6 @@ Contents:
 .. toctree::
    :maxdepth: 2
 
-   can327
    ctu/ctucanfd-driver
    freescale/flexcan
 

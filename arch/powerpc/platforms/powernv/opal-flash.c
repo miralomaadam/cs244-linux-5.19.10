@@ -432,7 +432,7 @@ static int alloc_image_buf(char *buffer, size_t count)
  * and pre-allocate required memory.
  */
 static ssize_t image_data_write(struct file *filp, struct kobject *kobj,
-				const struct bin_attribute *bin_attr,
+				struct bin_attribute *bin_attr,
 				char *buffer, loff_t pos, size_t count)
 {
 	int rc;
@@ -493,7 +493,7 @@ out:
 static const struct bin_attribute image_data_attr = {
 	.attr = {.name = "image", .mode = 0200},
 	.size = MAX_IMAGE_SIZE,	/* Limit image size */
-	.write_new = image_data_write,
+	.write = image_data_write,
 };
 
 static struct kobj_attribute validate_attribute =

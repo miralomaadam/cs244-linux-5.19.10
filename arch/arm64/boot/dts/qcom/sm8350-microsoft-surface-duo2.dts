@@ -44,7 +44,7 @@
 };
 
 &apps_rsc {
-	regulators-0 {
+	pm8350-rpmh-regulators {
 		compatible = "qcom,pm8350-rpmh-regulators";
 		qcom,pmic-id = "b";
 
@@ -135,7 +135,7 @@
 		};
 	};
 
-	regulators-1 {
+	pm8350c-rpmh-regulators {
 		compatible = "qcom,pm8350c-rpmh-regulators";
 		qcom,pmic-id = "c";
 
@@ -290,9 +290,9 @@
 };
 
 &ipa {
-	qcom,gsi-loader = "self";
-	memory-region = <&pil_ipa_fw_mem>;
 	status = "okay";
+
+	memory-region = <&pil_ipa_fw_mem>;
 };
 
 &mpss {
@@ -336,14 +336,13 @@
 	status = "okay";
 
 	vdda-phy-supply = <&vreg_l5b_0p88>;
+	vdda-max-microamp = <91600>;
 	vdda-pll-supply = <&vreg_l6b_1p2>;
+	vdda-pll-max-microamp = <19000>;
 };
 
 &usb_1 {
 	status = "okay";
-};
-
-&usb_1_dwc3 {
 	dr_mode = "peripheral";
 };
 

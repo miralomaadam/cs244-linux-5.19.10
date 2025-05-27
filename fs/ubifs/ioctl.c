@@ -118,7 +118,7 @@ static int setflags(struct inode *inode, int flags)
 	ui->flags &= ~ioctl2ubifs(UBIFS_SETTABLE_IOCTL_FLAGS);
 	ui->flags |= ioctl2ubifs(flags);
 	ubifs_set_inode_flags(inode);
-	inode_set_ctime_current(inode);
+	inode->i_ctime = current_time(inode);
 	release = ui->dirty;
 	mark_inode_dirty_sync(inode);
 	mutex_unlock(&ui->ui_mutex);
@@ -144,7 +144,7 @@ int ubifs_fileattr_get(struct dentry *dentry, struct fileattr *fa)
 	return 0;
 }
 
-int ubifs_fileattr_set(struct mnt_idmap *idmap,
+int ubifs_fileattr_set(struct user_namespace *mnt_userns,
 		       struct dentry *dentry, struct fileattr *fa)
 {
 	struct inode *inode = d_inode(dentry);
@@ -213,6 +213,12 @@ long ubifs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 long ubifs_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
+	case FS_IOC32_GETFLAGS:
+		cmd = FS_IOC_GETFLAGS;
+		break;
+	case FS_IOC32_SETFLAGS:
+		cmd = FS_IOC_SETFLAGS;
+		break;
 	case FS_IOC_SET_ENCRYPTION_POLICY:
 	case FS_IOC_GET_ENCRYPTION_POLICY:
 	case FS_IOC_GET_ENCRYPTION_POLICY_EX:

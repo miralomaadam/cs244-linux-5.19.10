@@ -13,13 +13,13 @@
 
 #include <linux/clk.h>
 #include <linux/delay.h>
-#include <linux/ethtool.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 
 #include <linux/can/dev.h>
@@ -390,64 +390,42 @@ static int ifi_canfd_handle_lec_err(struct net_device *ndev)
 		return 0;
 
 	priv->can.can_stats.bus_error++;
+	stats->rx_errors++;
 
 	/* Propagate the error condition to the CAN stack. */
 	skb = alloc_can_err_skb(ndev, &cf);
+	if (unlikely(!skb))
+		return 0;
 
 	/* Read the error counter register and check for new errors. */
-	if (likely(skb))
-		cf->can_id |= CAN_ERR_PROT | CAN_ERR_BUSERROR;
+	cf->can_id |= CAN_ERR_PROT | CAN_ERR_BUSERROR;
 
-	if (errctr & IFI_CANFD_ERROR_CTR_OVERLOAD_FIRST) {
-		stats->rx_errors++;
-		if (likely(skb))
-			cf->data[2] |= CAN_ERR_PROT_OVERLOAD;
-	}
+	if (errctr & IFI_CANFD_ERROR_CTR_OVERLOAD_FIRST)
+		cf->data[2] |= CAN_ERR_PROT_OVERLOAD;
 
-	if (errctr & IFI_CANFD_ERROR_CTR_ACK_ERROR_FIRST) {
-		stats->tx_errors++;
-		if (likely(skb))
-			cf->data[3] = CAN_ERR_PROT_LOC_ACK;
-	}
+	if (errctr & IFI_CANFD_ERROR_CTR_ACK_ERROR_FIRST)
+		cf->data[3] = CAN_ERR_PROT_LOC_ACK;
 
-	if (errctr & IFI_CANFD_ERROR_CTR_BIT0_ERROR_FIRST) {
-		stats->tx_errors++;
-		if (likely(skb))
-			cf->data[2] |= CAN_ERR_PROT_BIT0;
-	}
+	if (errctr & IFI_CANFD_ERROR_CTR_BIT0_ERROR_FIRST)
+		cf->data[2] |= CAN_ERR_PROT_BIT0;
 
-	if (errctr & IFI_CANFD_ERROR_CTR_BIT1_ERROR_FIRST) {
-		stats->tx_errors++;
-		if (likely(skb))
-			cf->data[2] |= CAN_ERR_PROT_BIT1;
-	}
+	if (errctr & IFI_CANFD_ERROR_CTR_BIT1_ERROR_FIRST)
+		cf->data[2] |= CAN_ERR_PROT_BIT1;
 
-	if (errctr & IFI_CANFD_ERROR_CTR_STUFF_ERROR_FIRST) {
-		stats->rx_errors++;
-		if (likely(skb))
-			cf->data[2] |= CAN_ERR_PROT_STUFF;
-	}
+	if (errctr & IFI_CANFD_ERROR_CTR_STUFF_ERROR_FIRST)
+		cf->data[2] |= CAN_ERR_PROT_STUFF;
 
-	if (errctr & IFI_CANFD_ERROR_CTR_CRC_ERROR_FIRST) {
-		stats->rx_errors++;
-		if (likely(skb))
-			cf->data[3] = CAN_ERR_PROT_LOC_CRC_SEQ;
-	}
+	if (errctr & IFI_CANFD_ERROR_CTR_CRC_ERROR_FIRST)
+		cf->data[3] = CAN_ERR_PROT_LOC_CRC_SEQ;
 
-	if (errctr & IFI_CANFD_ERROR_CTR_FORM_ERROR_FIRST) {
-		stats->rx_errors++;
-		if (likely(skb))
-			cf->data[2] |= CAN_ERR_PROT_FORM;
-	}
+	if (errctr & IFI_CANFD_ERROR_CTR_FORM_ERROR_FIRST)
+		cf->data[2] |= CAN_ERR_PROT_FORM;
 
 	/* Reset the error counter, ack the IRQ and re-enable the counter. */
 	writel(IFI_CANFD_ERROR_CTR_ER_RESET, priv->base + IFI_CANFD_ERROR_CTR);
 	writel(IFI_CANFD_INTERRUPT_ERROR_COUNTER,
 	       priv->base + IFI_CANFD_INTERRUPT);
 	writel(IFI_CANFD_ERROR_CTR_ER_ENABLE, priv->base + IFI_CANFD_ERROR_CTR);
-
-	if (unlikely(!skb))
-		return 0;
 
 	netif_receive_skb(skb);
 
@@ -514,7 +492,7 @@ static int ifi_canfd_handle_state_change(struct net_device *ndev,
 	switch (new_state) {
 	case CAN_STATE_ERROR_WARNING:
 		/* error warning state */
-		cf->can_id |= CAN_ERR_CRTL | CAN_ERR_CNT;
+		cf->can_id |= CAN_ERR_CRTL;
 		cf->data[1] = (bec.txerr > bec.rxerr) ?
 			CAN_ERR_CRTL_TX_WARNING :
 			CAN_ERR_CRTL_RX_WARNING;
@@ -523,7 +501,7 @@ static int ifi_canfd_handle_state_change(struct net_device *ndev,
 		break;
 	case CAN_STATE_ERROR_PASSIVE:
 		/* error passive state */
-		cf->can_id |= CAN_ERR_CRTL | CAN_ERR_CNT;
+		cf->can_id |= CAN_ERR_CRTL;
 		cf->data[1] |= CAN_ERR_CRTL_RX_PASSIVE;
 		if (bec.txerr > 127)
 			cf->data[1] |= CAN_ERR_CRTL_TX_PASSIVE;
@@ -881,7 +859,7 @@ static netdev_tx_t ifi_canfd_start_xmit(struct sk_buff *skb,
 	u32 txst, txid, txdlc;
 	int i;
 
-	if (can_dev_dropped_skb(ndev, skb))
+	if (can_dropped_invalid_skb(ndev, skb))
 		return NETDEV_TX_OK;
 
 	/* Check if the TX buffer is full */
@@ -947,10 +925,6 @@ static const struct net_device_ops ifi_canfd_netdev_ops = {
 	.ndo_change_mtu	= can_change_mtu,
 };
 
-static const struct ethtool_ops ifi_canfd_ethtool_ops = {
-	.get_ts_info = ethtool_op_get_ts_info,
-};
-
 static int ifi_canfd_plat_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -988,13 +962,12 @@ static int ifi_canfd_plat_probe(struct platform_device *pdev)
 	ndev->irq = irq;
 	ndev->flags |= IFF_ECHO;	/* we support local echo */
 	ndev->netdev_ops = &ifi_canfd_netdev_ops;
-	ndev->ethtool_ops = &ifi_canfd_ethtool_ops;
 
 	priv = netdev_priv(ndev);
 	priv->ndev = ndev;
 	priv->base = addr;
 
-	netif_napi_add(ndev, &priv->napi, ifi_canfd_poll);
+	netif_napi_add(ndev, &priv->napi, ifi_canfd_poll, 64);
 
 	priv->can.state = CAN_STATE_STOPPED;
 
@@ -1034,13 +1007,15 @@ err_reg:
 	return ret;
 }
 
-static void ifi_canfd_plat_remove(struct platform_device *pdev)
+static int ifi_canfd_plat_remove(struct platform_device *pdev)
 {
 	struct net_device *ndev = platform_get_drvdata(pdev);
 
 	unregister_candev(ndev);
 	platform_set_drvdata(pdev, NULL);
 	free_candev(ndev);
+
+	return 0;
 }
 
 static const struct of_device_id ifi_canfd_of_table[] = {
@@ -1055,7 +1030,7 @@ static struct platform_driver ifi_canfd_plat_driver = {
 		.of_match_table	= ifi_canfd_of_table,
 	},
 	.probe	= ifi_canfd_plat_probe,
-	.remove = ifi_canfd_plat_remove,
+	.remove	= ifi_canfd_plat_remove,
 };
 
 module_platform_driver(ifi_canfd_plat_driver);

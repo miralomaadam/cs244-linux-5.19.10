@@ -1,8 +1,8 @@
-/* SPDX-License-Identifier: GPL-2.0-only
- * SPDX-FileCopyrightText: Copyright (c) 2020-2024 NVIDIA CORPORATION & AFFILIATES.
- * All rights reserved.
- *
+/* SPDX-License-Identifier: GPL-2.0-only */
+/*
  * tegra210_i2s.h - Definitions for Tegra210 I2S driver
+ *
+ * Copyright (c) 2020 NVIDIA CORPORATION. All rights reserved.
  *
  */
 
@@ -87,7 +87,6 @@
 
 #define I2S_BITS_8				1
 #define I2S_BITS_16				3
-#define I2S_BITS_24				5
 #define I2S_BITS_32				7
 #define I2S_CTRL_BIT_SIZE_MASK			0x7
 
@@ -113,8 +112,6 @@ struct tegra210_i2s {
 	struct clk *clk_i2s;
 	struct clk *clk_sync_input;
 	struct regmap *regmap;
-	int client_sample_format;
-	unsigned int client_channels;
 	unsigned int stereo_to_mono[I2S_PATHS];
 	unsigned int mono_to_stereo[I2S_PATHS];
 	unsigned int dai_fmt;

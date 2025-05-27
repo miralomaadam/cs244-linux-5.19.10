@@ -72,13 +72,13 @@ static int bd9571mwv_gpio_get(struct gpio_chip *chip, unsigned int offset)
 	return val & BIT(offset);
 }
 
-static int bd9571mwv_gpio_set(struct gpio_chip *chip, unsigned int offset,
+static void bd9571mwv_gpio_set(struct gpio_chip *chip, unsigned int offset,
 			      int value)
 {
 	struct bd9571mwv_gpio *gpio = gpiochip_get_data(chip);
 
-	return regmap_update_bits(gpio->regmap, BD9571MWV_GPIO_OUT,
-				  BIT(offset), value ? BIT(offset) : 0);
+	regmap_update_bits(gpio->regmap, BD9571MWV_GPIO_OUT,
+			   BIT(offset), value ? BIT(offset) : 0);
 }
 
 static const struct gpio_chip template_chip = {
@@ -88,7 +88,7 @@ static const struct gpio_chip template_chip = {
 	.direction_input	= bd9571mwv_gpio_direction_input,
 	.direction_output	= bd9571mwv_gpio_direction_output,
 	.get			= bd9571mwv_gpio_get,
-	.set_rv			= bd9571mwv_gpio_set,
+	.set			= bd9571mwv_gpio_set,
 	.base			= -1,
 	.ngpio			= 2,
 	.can_sleep		= true,

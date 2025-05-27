@@ -15,7 +15,6 @@
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/export.h>
-#include <asm/asm.h>
 
 /*
  * Helper functions to find the end of a string
@@ -239,11 +238,12 @@ static inline int clcle(const char *s1, unsigned long l1,
 	asm volatile(
 		"0:	clcle	%[r1],%[r3],0\n"
 		"	jo	0b\n"
-		CC_IPM(cc)
-		: CC_OUT(cc, cc), [r1] "+d" (r1.pair), [r3] "+d" (r3.pair)
+		"	ipm	%[cc]\n"
+		"	srl	%[cc],28\n"
+		: [cc] "=&d" (cc), [r1] "+&d" (r1.pair), [r3] "+&d" (r3.pair)
 		:
-		: CC_CLOBBER_LIST("memory"));
-	return CC_TRANSFORM(cc);
+		: "cc", "memory");
+	return cc;
 }
 
 /**

@@ -1,8 +1,11 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * arch/arm/mach-dove/pcie.c
  *
  * PCIe functions for Marvell Dove 88AP510 SoC
+ *
+ * This file is licensed under the terms of the GNU General Public
+ * License version 2. This program is licensed "as is" without any
+ * warranty of any kind, whether express or implied.
  */
 
 #include <linux/kernel.h>
@@ -142,14 +145,14 @@ static struct pci_ops pcie_ops = {
 static void rc_pci_fixup(struct pci_dev *dev)
 {
 	if (dev->bus->parent == NULL && dev->devfn == 0) {
-		struct resource *r;
+		int i;
 
 		dev->class &= 0xff;
 		dev->class |= PCI_CLASS_BRIDGE_HOST << 8;
-		pci_dev_for_each_resource(dev, r) {
-			r->start = 0;
-			r->end   = 0;
-			r->flags = 0;
+		for (i = 0; i < DEVICE_COUNT_RESOURCE; i++) {
+			dev->resource[i].start = 0;
+			dev->resource[i].end   = 0;
+			dev->resource[i].flags = 0;
 		}
 	}
 }

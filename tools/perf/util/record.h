@@ -13,6 +13,7 @@ struct option;
 
 struct record_opts {
 	struct target target;
+	bool	      group;
 	bool	      inherit_stat;
 	bool	      no_buffering;
 	bool	      no_inherit;
@@ -27,7 +28,6 @@ struct record_opts {
 	bool	      sample_time;
 	bool	      sample_time_set;
 	bool	      sample_cpu;
-	bool	      sample_identifier;
 	bool	      period;
 	bool	      period_set;
 	bool	      running_time;
@@ -65,6 +65,7 @@ struct record_opts {
 	const char    *auxtrace_snapshot_opts;
 	const char    *auxtrace_sample_opts;
 	bool	      sample_transaction;
+	int	      initial_delay;
 	bool	      use_clockid;
 	clockid_t     clockid;
 	u64	      clockid_res_ns;

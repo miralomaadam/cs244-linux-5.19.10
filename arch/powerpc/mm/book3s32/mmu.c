@@ -25,7 +25,7 @@
 
 #include <asm/mmu.h>
 #include <asm/machdep.h>
-#include <asm/text-patching.h>
+#include <asm/code-patching.h>
 #include <asm/sections.h>
 
 #include <mm/mmu_decl.h>
@@ -127,7 +127,7 @@ static void setibat(int index, unsigned long virt, phys_addr_t phys,
 	wimgxpp = (flags & _PAGE_COHERENT) | (_PAGE_EXEC ? BPP_RX : BPP_XX);
 	bat[0].batu = virt | (bl << 2) | 2; /* Vs=1, Vp=0 */
 	bat[0].batl = BAT_PHYS_ADDR(phys) | wimgxpp;
-	if (!is_kernel_addr(virt))
+	if (flags & _PAGE_USER)
 		bat[0].batu |= 1;	/* Vp = 1 */
 }
 
@@ -158,13 +158,13 @@ static unsigned long __init __mmu_mapin_ram(unsigned long base, unsigned long to
 unsigned long __init mmu_mapin_ram(unsigned long base, unsigned long top)
 {
 	unsigned long done;
-	unsigned long border = (unsigned long)__srwx_boundary - PAGE_OFFSET;
+	unsigned long border = (unsigned long)__init_begin - PAGE_OFFSET;
 	unsigned long size;
 
 	size = roundup_pow_of_two((unsigned long)_einittext - PAGE_OFFSET);
 	setibat(0, PAGE_OFFSET, 0, size, PAGE_KERNEL_X);
 
-	if (debug_pagealloc_enabled_or_kfence()) {
+	if (debug_pagealloc_enabled_or_kfence() || __map_without_bats) {
 		pr_debug_once("Read-Write memory mapped without BATs\n");
 		if (base >= border)
 			return base;
@@ -184,7 +184,7 @@ unsigned long __init mmu_mapin_ram(unsigned long base, unsigned long top)
 
 static bool is_module_segment(unsigned long addr)
 {
-	if (!IS_ENABLED(CONFIG_EXECMEM))
+	if (!IS_ENABLED(CONFIG_MODULES))
 		return false;
 	if (addr < ALIGN_DOWN(MODULES_VADDR, SZ_256M))
 		return false;
@@ -193,7 +193,7 @@ static bool is_module_segment(unsigned long addr)
 	return true;
 }
 
-int mmu_mark_initmem_nx(void)
+void mmu_mark_initmem_nx(void)
 {
 	int nb = mmu_has_feature(MMU_FTR_USE_HIGH_BATS) ? 8 : 4;
 	int i;
@@ -223,8 +223,6 @@ int mmu_mark_initmem_nx(void)
 
 	update_bats();
 
-	BUILD_BUG_ON(ALIGN_DOWN(MODULES_VADDR, SZ_256M) < TASK_SIZE);
-
 	for (i = TASK_SIZE >> 28; i < 16; i++) {
 		/* Do not set NX on VM space for modules */
 		if (is_module_segment(i << 28))
@@ -232,10 +230,9 @@ int mmu_mark_initmem_nx(void)
 
 		mtsr(mfsr(i << 28) | 0x10000000, i << 28);
 	}
-	return 0;
 }
 
-int mmu_mark_rodata_ro(void)
+void mmu_mark_rodata_ro(void)
 {
 	int nb = mmu_has_feature(MMU_FTR_USE_HIGH_BATS) ? 8 : 4;
 	int i;
@@ -243,13 +240,11 @@ int mmu_mark_rodata_ro(void)
 	for (i = 0; i < nb; i++) {
 		struct ppc_bat *bat = BATS[i];
 
-		if (bat_addrs[i].start < (unsigned long)__end_rodata)
+		if (bat_addrs[i].start < (unsigned long)__init_begin)
 			bat[1].batl = (bat[1].batl & ~BPP_RW) | BPP_RX;
 	}
 
 	update_bats();
-
-	return 0;
 }
 
 /*
@@ -282,10 +277,10 @@ void __init setbat(int index, unsigned long virt, phys_addr_t phys,
 	/* Do DBAT first */
 	wimgxpp = flags & (_PAGE_WRITETHRU | _PAGE_NO_CACHE
 			   | _PAGE_COHERENT | _PAGE_GUARDED);
-	wimgxpp |= (flags & _PAGE_WRITE) ? BPP_RW : BPP_RX;
+	wimgxpp |= (flags & _PAGE_RW)? BPP_RW: BPP_RX;
 	bat[1].batu = virt | (bl << 2) | 2; /* Vs=1, Vp=0 */
 	bat[1].batl = BAT_PHYS_ADDR(phys) | wimgxpp;
-	if (!is_kernel_addr(virt))
+	if (flags & _PAGE_USER)
 		bat[1].batu |= 1; 	/* Vp = 1 */
 	if (flags & _PAGE_GUARDED) {
 		/* G bit must be zero in IBATs */
@@ -319,9 +314,11 @@ static void hash_preload(struct mm_struct *mm, unsigned long ea)
  *
  * This must always be called with the pte lock held.
  */
-void __update_mmu_cache(struct vm_area_struct *vma, unsigned long address,
+void update_mmu_cache(struct vm_area_struct *vma, unsigned long address,
 		      pte_t *ptep)
 {
+	if (!mmu_has_feature(MMU_FTR_HPTE_TABLE))
+		return;
 	/*
 	 * We don't need to worry about _PAGE_PRESENT here because we are
 	 * called with either mm->page_table_lock held or ptl lock held
@@ -377,7 +374,10 @@ void __init MMU_init_hw(void)
 	 * Find some memory for the hash table.
 	 */
 	if ( ppc_md.progress ) ppc_md.progress("hash:find piece", 0x322);
-	Hash = memblock_alloc_or_panic(Hash_size, Hash_size);
+	Hash = memblock_alloc(Hash_size, Hash_size);
+	if (!Hash)
+		panic("%s: Failed to allocate %lu bytes align=0x%lx\n",
+		      __func__, Hash_size, Hash_size);
 	_SDR1 = __pa(Hash) | SDR1_LOW_BITS;
 
 	pr_info("Total memory = %lldMB; using %ldkB for hash table\n",

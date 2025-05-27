@@ -133,7 +133,6 @@ static void xhci_debugfs_regset(struct xhci_hcd *xhci, u32 base,
 	regset->regs = regs;
 	regset->nregs = nregs;
 	regset->base = hcd->regs + base;
-	regset->dev = hcd->self.controller;
 
 	debugfs_create_regset32((const char *)rgs->name, 0444, parent, regset);
 }
@@ -204,7 +203,7 @@ static void xhci_ring_dump_segment(struct seq_file *s,
 	for (i = 0; i < TRBS_PER_SEGMENT; i++) {
 		trb = &seg->trbs[i];
 		dma = seg->dma + i * sizeof(*trb);
-		seq_printf(s, "%2u %pad: %s\n", seg->num, &dma,
+		seq_printf(s, "%pad: %s\n", &dma,
 			   xhci_decode_trb(str, XHCI_MSG_MAX, le32_to_cpu(trb->generic.field[0]),
 					   le32_to_cpu(trb->generic.field[1]),
 					   le32_to_cpu(trb->generic.field[2]),
@@ -214,11 +213,14 @@ static void xhci_ring_dump_segment(struct seq_file *s,
 
 static int xhci_ring_trb_show(struct seq_file *s, void *unused)
 {
+	int			i;
 	struct xhci_ring	*ring = *(struct xhci_ring **)s->private;
 	struct xhci_segment	*seg = ring->first_seg;
 
-	xhci_for_each_ring_seg(ring->first_seg, seg)
+	for (i = 0; i < ring->num_segs; i++) {
 		xhci_ring_dump_segment(s, seg);
+		seg = seg->next;
+	}
 
 	return 0;
 }
@@ -232,7 +234,16 @@ static struct xhci_file_map ring_files[] = {
 
 static int xhci_ring_open(struct inode *inode, struct file *file)
 {
-	const struct xhci_file_map *f_map = debugfs_get_aux(file);
+	int			i;
+	struct xhci_file_map	*f_map;
+	const char		*file_name = file_dentry(file)->d_iname;
+
+	for (i = 0; i < ARRAY_SIZE(ring_files); i++) {
+		f_map = &ring_files[i];
+
+		if (strcmp(f_map->name, file_name) == 0)
+			break;
+	}
 
 	return single_open(file, f_map->show, inode->i_private);
 }
@@ -279,13 +290,12 @@ static int xhci_endpoint_context_show(struct seq_file *s, void *unused)
 	for (ep_index = 0; ep_index < 31; ep_index++) {
 		ep_ctx = xhci_get_ep_ctx(xhci, dev->out_ctx, ep_index);
 		dma = dev->out_ctx->dma + (ep_index + 1) * CTX_SIZE(xhci->hcc_params);
-		seq_printf(s, "%pad: %s, virt_state:%#x\n", &dma,
+		seq_printf(s, "%pad: %s\n", &dma,
 			   xhci_decode_ep_context(str,
 						  le32_to_cpu(ep_ctx->ep_info),
 						  le32_to_cpu(ep_ctx->ep_info2),
 						  le64_to_cpu(ep_ctx->deq),
-						  le32_to_cpu(ep_ctx->tx_info)),
-						  dev->eps[ep_index].ep_state);
+						  le32_to_cpu(ep_ctx->tx_info)));
 	}
 
 	return 0;
@@ -309,7 +319,16 @@ static struct xhci_file_map context_files[] = {
 
 static int xhci_context_open(struct inode *inode, struct file *file)
 {
-	const struct xhci_file_map *f_map = debugfs_get_aux(file);
+	int			i;
+	struct xhci_file_map	*f_map;
+	const char		*file_name = file_dentry(file)->d_iname;
+
+	for (i = 0; i < ARRAY_SIZE(context_files); i++) {
+		f_map = &context_files[i];
+
+		if (strcmp(f_map->name, file_name) == 0)
+			break;
+	}
 
 	return single_open(file, f_map->show, inode->i_private);
 }
@@ -392,8 +411,7 @@ static void xhci_debugfs_create_files(struct xhci_hcd *xhci,
 	int			i;
 
 	for (i = 0; i < nentries; i++)
-		debugfs_create_file_aux(files[i].name, 0444, parent,
-					data, &files[i], fops);
+		debugfs_create_file(files[i].name, 0444, parent, data, fops);
 }
 
 static struct dentry *xhci_debugfs_create_ring_dir(struct xhci_hcd *xhci,
@@ -674,7 +692,7 @@ void xhci_debugfs_init(struct xhci_hcd *xhci)
 				     "command-ring",
 				     xhci->debugfs_root);
 
-	xhci_debugfs_create_ring_dir(xhci, &xhci->interrupters[0]->event_ring,
+	xhci_debugfs_create_ring_dir(xhci, &xhci->event_ring,
 				     "event-ring",
 				     xhci->debugfs_root);
 

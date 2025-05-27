@@ -23,13 +23,17 @@
 #include <linux/platform_data/cros_ec_sensorhub.h>
 #include <linux/platform_device.h>
 
-#include "cros_ec_sensors_trace.h"
-
 /*
  * Hard coded to the first device to support sensor fifo.  The EC has a 2048
  * byte fifo and will trigger an interrupt when fifo is 2/3 full.
  */
 #define CROS_EC_FIFO_SIZE (2048 * 2 / 3)
+
+static char *cros_ec_loc[] = {
+	[MOTIONSENSE_LOC_BASE] = "base",
+	[MOTIONSENSE_LOC_LID] = "lid",
+	[MOTIONSENSE_LOC_MAX] = "unknown",
+};
 
 static int cros_ec_get_host_cmd_version_mask(struct cros_ec_device *ec_dev,
 					     u16 cmd_offset, u16 cmd, u32 *mask)
@@ -174,9 +178,9 @@ static ssize_t hwfifo_watermark_max_show(struct device *dev,
 
 static IIO_DEVICE_ATTR_RO(hwfifo_watermark_max, 0);
 
-static const struct iio_dev_attr *cros_ec_sensor_fifo_attributes[] = {
-	&iio_dev_attr_hwfifo_timeout,
-	&iio_dev_attr_hwfifo_watermark_max,
+static const struct attribute *cros_ec_sensor_fifo_attributes[] = {
+	&iio_dev_attr_hwfifo_timeout.dev_attr.attr,
+	&iio_dev_attr_hwfifo_watermark_max.dev_attr.attr,
 	NULL,
 };
 
@@ -192,15 +196,14 @@ int cros_ec_sensors_push_data(struct iio_dev *indio_dev,
 	/*
 	 * Ignore samples if the buffer is not set: it is needed if the ODR is
 	 * set but the buffer is not enabled yet.
-	 *
-	 * Note: iio_device_claim_buffer_mode() returns -EBUSY if the buffer
-	 * is not enabled.
 	 */
-	if (iio_device_claim_buffer_mode(indio_dev) < 0)
+	if (!iio_buffer_enabled(indio_dev))
 		return 0;
 
 	out = (s16 *)st->samples;
-	iio_for_each_active_channel(indio_dev, i) {
+	for_each_set_bit(i,
+			 indio_dev->active_scan_mask,
+			 indio_dev->masklength) {
 		*out = data[i];
 		out++;
 	}
@@ -213,7 +216,6 @@ int cros_ec_sensors_push_data(struct iio_dev *indio_dev,
 	iio_push_to_buffers_with_timestamp(indio_dev, st->samples,
 					   timestamp + delta);
 
-	iio_device_release_buffer_mode(indio_dev);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(cros_ec_sensors_push_data);
@@ -257,7 +259,7 @@ int cros_ec_sensors_core_init(struct platform_device *pdev,
 	platform_set_drvdata(pdev, indio_dev);
 
 	state->ec = ec->ec_dev;
-	state->msg = devm_kzalloc(&pdev->dev, sizeof(*state->msg) +
+	state->msg = devm_kzalloc(&pdev->dev,
 				max((u16)sizeof(struct ec_params_motion_sense),
 				state->ec->max_response), GFP_KERNEL);
 	if (!state->msg)
@@ -282,8 +284,6 @@ int cros_ec_sensors_core_init(struct platform_device *pdev,
 	indio_dev->name = pdev->name;
 
 	if (physical_device) {
-		enum motionsensor_location loc;
-
 		state->param.cmd = MOTIONSENSE_CMD_INFO;
 		state->param.info.sensor_num = sensor_platform->sensor_num;
 		ret = cros_ec_motion_send_host_cmd(state, 0);
@@ -292,13 +292,7 @@ int cros_ec_sensors_core_init(struct platform_device *pdev,
 			return ret;
 		}
 		state->type = state->resp->info.type;
-		loc = state->resp->info.location;
-		if (loc == MOTIONSENSE_LOC_BASE)
-			indio_dev->label = "accel-base";
-		else if (loc == MOTIONSENSE_LOC_LID)
-			indio_dev->label = "accel-display";
-		else if (loc == MOTIONSENSE_LOC_CAMERA)
-			indio_dev->label = "accel-camera";
+		state->loc = state->resp->info.location;
 
 		/* Set sign vector, only used for backward compatibility. */
 		memset(state->sign, 1, CROS_EC_SENSOR_MAX_AXIS);
@@ -415,7 +409,6 @@ EXPORT_SYMBOL_GPL(cros_ec_sensors_core_register);
 int cros_ec_motion_send_host_cmd(struct cros_ec_sensors_core_state *state,
 				 u16 opt_length)
 {
-	struct ec_response_motion_sense *resp = (struct ec_response_motion_sense *)state->msg->data;
 	int ret;
 
 	if (opt_length)
@@ -426,12 +419,12 @@ int cros_ec_motion_send_host_cmd(struct cros_ec_sensors_core_state *state,
 	memcpy(state->msg->data, &state->param, sizeof(state->param));
 
 	ret = cros_ec_cmd_xfer_status(state->ec, state->msg);
-	trace_cros_ec_motion_host_cmd(&state->param, resp, ret);
 	if (ret < 0)
 		return ret;
 
-	if (ret && state->resp != resp)
-		memcpy(state->resp, resp, ret);
+	if (ret &&
+	    state->resp != (struct ec_response_motion_sense *)state->msg->data)
+		memcpy(state->resp, state->msg->data, ret);
 
 	return 0;
 }
@@ -475,6 +468,15 @@ static ssize_t cros_ec_sensors_id(struct iio_dev *indio_dev,
 	return snprintf(buf, PAGE_SIZE, "%d\n", st->param.info.sensor_num);
 }
 
+static ssize_t cros_ec_sensors_loc(struct iio_dev *indio_dev,
+		uintptr_t private, const struct iio_chan_spec *chan,
+		char *buf)
+{
+	struct cros_ec_sensors_core_state *st = iio_priv(indio_dev);
+
+	return snprintf(buf, PAGE_SIZE, "%s\n", cros_ec_loc[st->loc]);
+}
+
 const struct iio_chan_spec_ext_info cros_ec_sensors_ext_info[] = {
 	{
 		.name = "calibrate",
@@ -485,6 +487,11 @@ const struct iio_chan_spec_ext_info cros_ec_sensors_ext_info[] = {
 		.name = "id",
 		.shared = IIO_SHARED_BY_ALL,
 		.read = cros_ec_sensors_id
+	},
+	{
+		.name = "location",
+		.shared = IIO_SHARED_BY_ALL,
+		.read = cros_ec_sensors_loc
 	},
 	{ },
 };
@@ -588,7 +595,7 @@ static int cros_ec_sensors_read_data_unsafe(struct iio_dev *indio_dev,
 	int ret;
 
 	/* Read all sensors enabled in scan_mask. Each value is 2 bytes. */
-	for_each_set_bit(i, &scan_mask, iio_get_masklength(indio_dev)) {
+	for_each_set_bit(i, &scan_mask, indio_dev->masklength) {
 		ret = cros_ec_sensors_cmd_read_u16(ec,
 					     cros_ec_sensors_idx_to_reg(st, i),
 					     data);
@@ -684,7 +691,7 @@ int cros_ec_sensors_read_cmd(struct iio_dev *indio_dev,
 		return ret;
 	}
 
-	for_each_set_bit(i, &scan_mask, iio_get_masklength(indio_dev)) {
+	for_each_set_bit(i, &scan_mask, indio_dev->masklength) {
 		*data = st->resp->data.data[i];
 		data++;
 	}

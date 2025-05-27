@@ -496,7 +496,7 @@ void saa7134_ir_close(struct rc_dev *rc)
 	struct saa7134_card_ir *ir = dev->remote;
 
 	if (ir->polling)
-		timer_delete_sync(&ir->timer);
+		del_timer_sync(&ir->timer);
 
 	ir->running = false;
 }

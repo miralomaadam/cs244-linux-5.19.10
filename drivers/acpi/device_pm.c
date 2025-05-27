@@ -75,17 +75,15 @@ static int acpi_dev_pm_explicit_get(struct acpi_device *device, int *state)
 int acpi_device_get_power(struct acpi_device *device, int *state)
 {
 	int result = ACPI_STATE_UNKNOWN;
-	struct acpi_device *parent;
 	int error;
 
 	if (!device || !state)
 		return -EINVAL;
 
-	parent = acpi_dev_parent(device);
-
 	if (!device->flags.power_manageable) {
 		/* TBD: Non-recursive algorithm for walking up hierarchy. */
-		*state = parent ? parent->power.state : ACPI_STATE_D0;
+		*state = device->parent ?
+			device->parent->power.state : ACPI_STATE_D0;
 		goto out;
 	}
 
@@ -124,10 +122,10 @@ int acpi_device_get_power(struct acpi_device *device, int *state)
 	 * point, the fact that the device is in D0 implies that the parent has
 	 * to be in D0 too, except if ignore_parent is set.
 	 */
-	if (!device->power.flags.ignore_parent && parent &&
-	    parent->power.state == ACPI_STATE_UNKNOWN &&
-	    result == ACPI_STATE_D0)
-		parent->power.state = ACPI_STATE_D0;
+	if (!device->power.flags.ignore_parent && device->parent
+	    && device->parent->power.state == ACPI_STATE_UNKNOWN
+	    && result == ACPI_STATE_D0)
+		device->parent->power.state = ACPI_STATE_D0;
 
 	*state = result;
 
@@ -193,17 +191,13 @@ int acpi_device_set_power(struct acpi_device *device, int state)
 		return -ENODEV;
 	}
 
-	if (!device->power.flags.ignore_parent) {
-		struct acpi_device *parent;
-
-		parent = acpi_dev_parent(device);
-		if (parent && state < parent->power.state) {
-			acpi_handle_debug(device->handle,
-					  "Cannot transition to %s for parent in %s\n",
-					  acpi_power_state_string(state),
-					  acpi_power_state_string(parent->power.state));
-			return -ENODEV;
-		}
+	if (!device->power.flags.ignore_parent && device->parent &&
+	    state < device->parent->power.state) {
+		acpi_handle_debug(device->handle,
+				  "Cannot transition to %s for parent in %s\n",
+				  acpi_power_state_string(state),
+				  acpi_power_state_string(device->parent->power.state));
+		return -ENODEV;
 	}
 
 	/*
@@ -375,41 +369,6 @@ int acpi_device_fix_up_power(struct acpi_device *device)
 }
 EXPORT_SYMBOL_GPL(acpi_device_fix_up_power);
 
-static int fix_up_power_if_applicable(struct acpi_device *adev, void *not_used)
-{
-	if (adev->status.present && adev->status.enabled)
-		acpi_device_fix_up_power(adev);
-
-	return 0;
-}
-
-/**
- * acpi_device_fix_up_power_extended - Force device and its children into D0.
- * @adev: Parent device object whose power state is to be fixed up.
- *
- * Call acpi_device_fix_up_power() for @adev and its children so long as they
- * are reported as present and enabled.
- */
-void acpi_device_fix_up_power_extended(struct acpi_device *adev)
-{
-	acpi_device_fix_up_power(adev);
-	acpi_dev_for_each_child(adev, fix_up_power_if_applicable, NULL);
-}
-EXPORT_SYMBOL_GPL(acpi_device_fix_up_power_extended);
-
-/**
- * acpi_device_fix_up_power_children - Force a device's children into D0.
- * @adev: Parent device object whose children's power state is to be fixed up.
- *
- * Call acpi_device_fix_up_power() for @adev's children so long as they
- * are reported as present and enabled.
- */
-void acpi_device_fix_up_power_children(struct acpi_device *adev)
-{
-	acpi_dev_for_each_child(adev, fix_up_power_if_applicable, NULL);
-}
-EXPORT_SYMBOL_GPL(acpi_device_fix_up_power_children);
-
 int acpi_device_update_power(struct acpi_device *device, int *state_p)
 {
 	int state;
@@ -497,25 +456,6 @@ void acpi_dev_power_up_children_with_adr(struct acpi_device *adev)
 	acpi_dev_for_each_child(adev, acpi_power_up_if_adr_present, NULL);
 }
 
-/**
- * acpi_dev_power_state_for_wake - Deepest power state for wakeup signaling
- * @adev: ACPI companion of the target device.
- *
- * Evaluate _S0W for @adev and return the value produced by it or return
- * ACPI_STATE_UNKNOWN on errors (including _S0W not present).
- */
-u8 acpi_dev_power_state_for_wake(struct acpi_device *adev)
-{
-	unsigned long long state;
-	acpi_status status;
-
-	status = acpi_evaluate_integer(adev->handle, "_S0W", NULL, &state);
-	if (ACPI_FAILURE(status))
-		return ACPI_STATE_UNKNOWN;
-
-	return state;
-}
-
 #ifdef CONFIG_PM
 static DEFINE_MUTEX(acpi_pm_notifier_lock);
 static DEFINE_MUTEX(acpi_pm_notifier_install_lock);
@@ -535,7 +475,7 @@ static void acpi_pm_notify_handler(acpi_handle handle, u32 val, void *not_used)
 
 	acpi_handle_debug(handle, "Wake notify\n");
 
-	adev = acpi_get_acpi_dev(handle);
+	adev = acpi_bus_get_acpi_device(handle);
 	if (!adev)
 		return;
 
@@ -553,7 +493,7 @@ static void acpi_pm_notify_handler(acpi_handle handle, u32 val, void *not_used)
 
 	mutex_unlock(&acpi_pm_notifier_lock);
 
-	acpi_put_acpi_dev(adev);
+	acpi_bus_put_acpi_device(adev);
 }
 
 /**
@@ -719,22 +659,7 @@ static int acpi_dev_pm_get_state(struct device *dev, struct acpi_device *adev,
 		d_min = ret;
 		wakeup = device_may_wakeup(dev) && adev->wakeup.flags.valid
 			&& adev->wakeup.sleep_state >= target_state;
-	} else if (device_may_wakeup(dev) && dev->power.wakeirq) {
-		/*
-		 * The ACPI subsystem doesn't manage the wake bit for IRQs
-		 * defined with ExclusiveAndWake and SharedAndWake. Instead we
-		 * expect them to be managed via the PM subsystem. Drivers
-		 * should call dev_pm_set_wake_irq to register an IRQ as a wake
-		 * source.
-		 *
-		 * If a device has a wake IRQ attached we need to check the
-		 * _S0W method to get the correct wake D-state. Otherwise we
-		 * end up putting the device into D3Cold which will more than
-		 * likely disable wake functionality.
-		 */
-		wakeup = true;
 	} else {
-		/* ACPI GPE is specified in _PRW. */
 		wakeup = adev->wakeup.flags.valid;
 	}
 
@@ -1161,7 +1086,7 @@ EXPORT_SYMBOL_GPL(acpi_subsys_complete);
  */
 int acpi_subsys_suspend(struct device *dev)
 {
-	if (!dev_pm_smart_suspend(dev) ||
+	if (!dev_pm_test_driver_flags(dev, DPM_FLAG_SMART_SUSPEND) ||
 	    acpi_dev_needs_resume(dev, ACPI_COMPANION(dev)))
 		pm_runtime_resume(dev);
 
@@ -1320,7 +1245,7 @@ EXPORT_SYMBOL_GPL(acpi_subsys_restore_early);
  */
 int acpi_subsys_poweroff(struct device *dev)
 {
-	if (!dev_pm_smart_suspend(dev) ||
+	if (!dev_pm_test_driver_flags(dev, DPM_FLAG_SMART_SUSPEND) ||
 	    acpi_dev_needs_resume(dev, ACPI_COMPANION(dev)))
 		pm_runtime_resume(dev);
 
@@ -1513,7 +1438,7 @@ EXPORT_SYMBOL_GPL(acpi_storage_d3);
  * not valid to ask for the ACPI power state of the device in that time frame.
  *
  * This function is intended to be used in a driver's probe or remove
- * function. See Documentation/firmware-guide/acpi/non-d0-probe.rst for
+ * function. See Documentation/firmware-guide/acpi/low-power-probe.rst for
  * more information.
  */
 bool acpi_dev_state_d0(struct device *dev)

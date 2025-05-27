@@ -1,10 +1,18 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Texas Instruments' Palmas Power Button Input Driver
  *
  * Copyright (C) 2012-2014 Texas Instruments Incorporated - http://www.ti.com/
  *	Girish S Ghongdemath
  *	Nishanth Menon
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed "as is" WITHOUT ANY WARRANTY of any
+ * kind, whether express or implied; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  */
 
 #include <linux/bitfield.h>
@@ -245,7 +253,7 @@ err_free_mem:
  *
  * Return: 0
  */
-static void palmas_pwron_remove(struct platform_device *pdev)
+static int palmas_pwron_remove(struct platform_device *pdev)
 {
 	struct palmas_pwron *pwron = platform_get_drvdata(pdev);
 
@@ -254,6 +262,8 @@ static void palmas_pwron_remove(struct platform_device *pdev)
 
 	input_unregister_device(pwron->input_dev);
 	kfree(pwron);
+
+	return 0;
 }
 
 /**
@@ -264,7 +274,7 @@ static void palmas_pwron_remove(struct platform_device *pdev)
  *
  * Return: 0
  */
-static int palmas_pwron_suspend(struct device *dev)
+static int __maybe_unused palmas_pwron_suspend(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct palmas_pwron *pwron = platform_get_drvdata(pdev);
@@ -285,7 +295,7 @@ static int palmas_pwron_suspend(struct device *dev)
  *
  * Return: 0
  */
-static int palmas_pwron_resume(struct device *dev)
+static int __maybe_unused palmas_pwron_resume(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct palmas_pwron *pwron = platform_get_drvdata(pdev);
@@ -296,8 +306,8 @@ static int palmas_pwron_resume(struct device *dev)
 	return 0;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(palmas_pwron_pm,
-				palmas_pwron_suspend, palmas_pwron_resume);
+static SIMPLE_DEV_PM_OPS(palmas_pwron_pm,
+			 palmas_pwron_suspend, palmas_pwron_resume);
 
 #ifdef CONFIG_OF
 static const struct of_device_id of_palmas_pwr_match[] = {
@@ -314,7 +324,7 @@ static struct platform_driver palmas_pwron_driver = {
 	.driver	= {
 		.name	= "palmas_pwrbutton",
 		.of_match_table = of_match_ptr(of_palmas_pwr_match),
-		.pm	= pm_sleep_ptr(&palmas_pwron_pm),
+		.pm	= &palmas_pwron_pm,
 	},
 };
 module_platform_driver(palmas_pwron_driver);

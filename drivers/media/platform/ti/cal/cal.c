@@ -13,7 +13,7 @@
 #include <linux/interrupt.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
@@ -61,24 +61,48 @@ MODULE_PARM_DESC(mc_api, "activates the MC API");
 const struct cal_format_info cal_formats[] = {
 	{
 		.fourcc		= V4L2_PIX_FMT_YUYV,
-		.code		= MEDIA_BUS_FMT_YUYV8_1X16,
+		.code		= MEDIA_BUS_FMT_YUYV8_2X8,
 		.bpp		= 16,
 	}, {
 		.fourcc		= V4L2_PIX_FMT_UYVY,
-		.code		= MEDIA_BUS_FMT_UYVY8_1X16,
+		.code		= MEDIA_BUS_FMT_UYVY8_2X8,
 		.bpp		= 16,
 	}, {
 		.fourcc		= V4L2_PIX_FMT_YVYU,
-		.code		= MEDIA_BUS_FMT_YVYU8_1X16,
+		.code		= MEDIA_BUS_FMT_YVYU8_2X8,
 		.bpp		= 16,
 	}, {
 		.fourcc		= V4L2_PIX_FMT_VYUY,
-		.code		= MEDIA_BUS_FMT_VYUY8_1X16,
+		.code		= MEDIA_BUS_FMT_VYUY8_2X8,
 		.bpp		= 16,
 	}, {
-		.fourcc		= V4L2_PIX_FMT_RGB565,
-		.code		= MEDIA_BUS_FMT_RGB565_1X16,
+		.fourcc		= V4L2_PIX_FMT_RGB565, /* gggbbbbb rrrrrggg */
+		.code		= MEDIA_BUS_FMT_RGB565_2X8_LE,
 		.bpp		= 16,
+	}, {
+		.fourcc		= V4L2_PIX_FMT_RGB565X, /* rrrrrggg gggbbbbb */
+		.code		= MEDIA_BUS_FMT_RGB565_2X8_BE,
+		.bpp		= 16,
+	}, {
+		.fourcc		= V4L2_PIX_FMT_RGB555, /* gggbbbbb arrrrrgg */
+		.code		= MEDIA_BUS_FMT_RGB555_2X8_PADHI_LE,
+		.bpp		= 16,
+	}, {
+		.fourcc		= V4L2_PIX_FMT_RGB555X, /* arrrrrgg gggbbbbb */
+		.code		= MEDIA_BUS_FMT_RGB555_2X8_PADHI_BE,
+		.bpp		= 16,
+	}, {
+		.fourcc		= V4L2_PIX_FMT_RGB24, /* rgb */
+		.code		= MEDIA_BUS_FMT_RGB888_2X12_LE,
+		.bpp		= 24,
+	}, {
+		.fourcc		= V4L2_PIX_FMT_BGR24, /* bgr */
+		.code		= MEDIA_BUS_FMT_RGB888_2X12_BE,
+		.bpp		= 24,
+	}, {
+		.fourcc		= V4L2_PIX_FMT_RGB32, /* argb */
+		.code		= MEDIA_BUS_FMT_ARGB8888_1X32,
+		.bpp		= 32,
 	}, {
 		.fourcc		= V4L2_PIX_FMT_SBGGR8,
 		.code		= MEDIA_BUS_FMT_SBGGR8_1X8,
@@ -446,24 +470,30 @@ static bool cal_ctx_wr_dma_stopped(struct cal_ctx *ctx)
 }
 
 static int
-cal_get_remote_frame_desc_entry(struct cal_ctx *ctx,
+cal_get_remote_frame_desc_entry(struct cal_camerarx *phy,
 				struct v4l2_mbus_frame_desc_entry *entry)
 {
 	struct v4l2_mbus_frame_desc fd;
-	struct media_pad *phy_source_pad;
 	int ret;
 
-	phy_source_pad = media_pad_remote_pad_first(&ctx->pad);
-	if (!phy_source_pad)
-		return -ENODEV;
-
-	ret = v4l2_subdev_call(&ctx->phy->subdev, pad, get_frame_desc,
-			       phy_source_pad->index, &fd);
-	if (ret)
+	ret = cal_camerarx_get_remote_frame_desc(phy, &fd);
+	if (ret) {
+		if (ret != -ENOIOCTLCMD)
+			dev_err(phy->cal->dev,
+				"Failed to get remote frame desc: %d\n", ret);
 		return ret;
+	}
 
-	if (fd.num_entries != 1)
-		return -EINVAL;
+	if (fd.num_entries == 0) {
+		dev_err(phy->cal->dev,
+			"No streams found in the remote frame descriptor\n");
+
+		return -ENODEV;
+	}
+
+	if (fd.num_entries > 1)
+		dev_dbg(phy->cal->dev,
+			"Multiple streams not supported in remote frame descriptor, using the first one\n");
 
 	*entry = fd.entry[0];
 
@@ -475,7 +505,7 @@ int cal_ctx_prepare(struct cal_ctx *ctx)
 	struct v4l2_mbus_frame_desc_entry entry;
 	int ret;
 
-	ret = cal_get_remote_frame_desc_entry(ctx, &entry);
+	ret = cal_get_remote_frame_desc_entry(ctx->phy, &entry);
 
 	if (ret == -ENOIOCTLCMD) {
 		ctx->vc = 0;
@@ -513,22 +543,7 @@ void cal_ctx_unprepare(struct cal_ctx *ctx)
 
 void cal_ctx_start(struct cal_ctx *ctx)
 {
-	struct cal_camerarx *phy = ctx->phy;
-
-	/*
-	 * Reset the frame number & sequence number, but only if the
-	 * virtual channel is not already in use.
-	 */
-
-	spin_lock(&phy->vc_lock);
-
-	if (phy->vc_enable_count[ctx->vc]++ == 0) {
-		phy->vc_frame_number[ctx->vc] = 0;
-		phy->vc_sequence[ctx->vc] = 0;
-	}
-
-	spin_unlock(&phy->vc_lock);
-
+	ctx->sequence = 0;
 	ctx->dma.state = CAL_DMA_RUNNING;
 
 	/* Configure the CSI-2, pixel processing and write DMA contexts. */
@@ -548,14 +563,7 @@ void cal_ctx_start(struct cal_ctx *ctx)
 
 void cal_ctx_stop(struct cal_ctx *ctx)
 {
-	struct cal_camerarx *phy = ctx->phy;
-	long time_left;
-
-	WARN_ON(phy->vc_enable_count[ctx->vc] == 0);
-
-	spin_lock(&phy->vc_lock);
-	phy->vc_enable_count[ctx->vc]--;
-	spin_unlock(&phy->vc_lock);
+	long timeout;
 
 	/*
 	 * Request DMA stop and wait until it completes. If completion times
@@ -565,9 +573,9 @@ void cal_ctx_stop(struct cal_ctx *ctx)
 	ctx->dma.state = CAL_DMA_STOP_REQUESTED;
 	spin_unlock_irq(&ctx->dma.lock);
 
-	time_left = wait_event_timeout(ctx->dma.wait, cal_ctx_wr_dma_stopped(ctx),
-				       msecs_to_jiffies(500));
-	if (!time_left) {
+	timeout = wait_event_timeout(ctx->dma.wait, cal_ctx_wr_dma_stopped(ctx),
+				     msecs_to_jiffies(500));
+	if (!timeout) {
 		ctx_err(ctx, "failed to disable dma cleanly\n");
 		cal_ctx_wr_dma_disable(ctx);
 	}
@@ -592,34 +600,6 @@ void cal_ctx_stop(struct cal_ctx *ctx)
  *	IRQ Handling
  * ------------------------------------------------------------------
  */
-
-/*
- * Track a sequence number for each virtual channel, which is shared by
- * all contexts using the same virtual channel. This is done using the
- * CSI-2 frame number as a base.
- */
-static void cal_update_seq_number(struct cal_ctx *ctx)
-{
-	struct cal_dev *cal = ctx->cal;
-	struct cal_camerarx *phy = ctx->phy;
-	u16 prev_frame_num, frame_num;
-	u8 vc = ctx->vc;
-
-	frame_num =
-		cal_read(cal, CAL_CSI2_STATUS(phy->instance, ctx->csi2_ctx)) &
-		0xffff;
-
-	if (phy->vc_frame_number[vc] != frame_num) {
-		prev_frame_num = phy->vc_frame_number[vc];
-
-		if (prev_frame_num >= frame_num)
-			phy->vc_sequence[vc] += 1;
-		else
-			phy->vc_sequence[vc] += frame_num - prev_frame_num;
-
-		phy->vc_frame_number[vc] = frame_num;
-	}
-}
 
 static inline void cal_irq_wdma_start(struct cal_ctx *ctx)
 {
@@ -651,8 +631,6 @@ static inline void cal_irq_wdma_start(struct cal_ctx *ctx)
 	}
 
 	spin_unlock(&ctx->dma.lock);
-
-	cal_update_seq_number(ctx);
 }
 
 static inline void cal_irq_wdma_end(struct cal_ctx *ctx)
@@ -679,62 +657,27 @@ static inline void cal_irq_wdma_end(struct cal_ctx *ctx)
 	if (buf) {
 		buf->vb.vb2_buf.timestamp = ktime_get_ns();
 		buf->vb.field = ctx->v_fmt.fmt.pix.field;
-		buf->vb.sequence = ctx->phy->vc_sequence[ctx->vc];
-
+		buf->vb.sequence = ctx->sequence++;
 		vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
-	}
-}
-
-static void cal_irq_handle_wdma(struct cal_ctx *ctx, bool start, bool end)
-{
-	/*
-	 * CAL HW interrupts are inherently racy. If we get both start and end
-	 * interrupts, we don't know what has happened: did the DMA for a single
-	 * frame start and end, or did one frame end and a new frame start?
-	 *
-	 * Usually for normal pixel frames we get the interrupts separately. If
-	 * we do get both, we have to guess. The assumption in the code below is
-	 * that the active vertical area is larger than the blanking vertical
-	 * area, and thus it is more likely that we get the end of the old frame
-	 * and the start of a new frame.
-	 *
-	 * However, for embedded data, which is only a few lines high, we always
-	 * get both interrupts. Here the assumption is that we get both for the
-	 * same frame.
-	 */
-	if (ctx->v_fmt.fmt.pix.height < 10) {
-		if (start)
-			cal_irq_wdma_start(ctx);
-
-		if (end)
-			cal_irq_wdma_end(ctx);
-	} else {
-		if (end)
-			cal_irq_wdma_end(ctx);
-
-		if (start)
-			cal_irq_wdma_start(ctx);
 	}
 }
 
 static irqreturn_t cal_irq(int irq_cal, void *data)
 {
 	struct cal_dev *cal = data;
-	u32 status[3];
-	unsigned int i;
+	u32 status;
 
-	for (i = 0; i < 3; ++i) {
-		status[i] = cal_read(cal, CAL_HL_IRQSTATUS(i));
-		if (status[i])
-			cal_write(cal, CAL_HL_IRQSTATUS(i), status[i]);
-	}
+	status = cal_read(cal, CAL_HL_IRQSTATUS(0));
+	if (status) {
+		unsigned int i;
 
-	if (status[0]) {
-		if (status[0] & CAL_HL_IRQ_OCPO_ERR_MASK)
+		cal_write(cal, CAL_HL_IRQSTATUS(0), status);
+
+		if (status & CAL_HL_IRQ_OCPO_ERR_MASK)
 			dev_err_ratelimited(cal->dev, "OCPO ERROR\n");
 
 		for (i = 0; i < cal->data->num_csi2_phy; ++i) {
-			if (status[0] & CAL_HL_IRQ_CIO_MASK(i)) {
+			if (status & CAL_HL_IRQ_CIO_MASK(i)) {
 				u32 cio_stat = cal_read(cal,
 							CAL_CSI2_COMPLEXIO_IRQSTATUS(i));
 
@@ -745,7 +688,7 @@ static irqreturn_t cal_irq(int irq_cal, void *data)
 					  cio_stat);
 			}
 
-			if (status[0] & CAL_HL_IRQ_VC_MASK(i)) {
+			if (status & CAL_HL_IRQ_VC_MASK(i)) {
 				u32 vc_stat = cal_read(cal, CAL_CSI2_VC_IRQSTATUS(i));
 
 				dev_err_ratelimited(cal->dev,
@@ -757,12 +700,32 @@ static irqreturn_t cal_irq(int irq_cal, void *data)
 		}
 	}
 
-	for (i = 0; i < cal->num_contexts; ++i) {
-		bool end = !!(status[1] & CAL_HL_IRQ_WDMA_END_MASK(i));
-		bool start = !!(status[2] & CAL_HL_IRQ_WDMA_START_MASK(i));
+	/* Check which DMA just finished */
+	status = cal_read(cal, CAL_HL_IRQSTATUS(1));
+	if (status) {
+		unsigned int i;
 
-		if (start || end)
-			cal_irq_handle_wdma(cal->ctx[i], start, end);
+		/* Clear Interrupt status */
+		cal_write(cal, CAL_HL_IRQSTATUS(1), status);
+
+		for (i = 0; i < cal->num_contexts; ++i) {
+			if (status & CAL_HL_IRQ_WDMA_END_MASK(i))
+				cal_irq_wdma_end(cal->ctx[i]);
+		}
+	}
+
+	/* Check which DMA just started */
+	status = cal_read(cal, CAL_HL_IRQSTATUS(2));
+	if (status) {
+		unsigned int i;
+
+		/* Clear Interrupt status */
+		cal_write(cal, CAL_HL_IRQSTATUS(2), status);
+
+		for (i = 0; i < cal->num_contexts; ++i) {
+			if (status & CAL_HL_IRQ_WDMA_START_MASK(i))
+				cal_irq_wdma_start(cal->ctx[i]);
+		}
 	}
 
 	return IRQ_HANDLED;
@@ -774,19 +737,19 @@ static irqreturn_t cal_irq(int irq_cal, void *data)
  */
 
 struct cal_v4l2_async_subdev {
-	struct v4l2_async_connection asd; /* Must be first */
+	struct v4l2_async_subdev asd; /* Must be first */
 	struct cal_camerarx *phy;
 };
 
 static inline struct cal_v4l2_async_subdev *
-to_cal_asd(struct v4l2_async_connection *asd)
+to_cal_asd(struct v4l2_async_subdev *asd)
 {
 	return container_of(asd, struct cal_v4l2_async_subdev, asd);
 }
 
 static int cal_async_notifier_bound(struct v4l2_async_notifier *notifier,
 				    struct v4l2_subdev *subdev,
-				    struct v4l2_async_connection *asd)
+				    struct v4l2_async_subdev *asd)
 {
 	struct cal_camerarx *phy = to_cal_asd(asd)->phy;
 	int pad;
@@ -798,6 +761,7 @@ static int cal_async_notifier_bound(struct v4l2_async_notifier *notifier,
 		return 0;
 	}
 
+	phy->source = subdev;
 	phy_dbg(1, phy, "Using source %s for capture\n", subdev->name);
 
 	pad = media_entity_get_fwnode_pad(&subdev->entity,
@@ -818,9 +782,6 @@ static int cal_async_notifier_bound(struct v4l2_async_notifier *notifier,
 			subdev->name);
 		return ret;
 	}
-
-	phy->source = subdev;
-	phy->source_pad = pad;
 
 	return 0;
 }
@@ -867,7 +828,7 @@ static int cal_async_notifier_register(struct cal_dev *cal)
 	unsigned int i;
 	int ret;
 
-	v4l2_async_nf_init(&cal->notifier, &cal->v4l2_dev);
+	v4l2_async_nf_init(&cal->notifier);
 	cal->notifier.ops = &cal_async_notifier_ops;
 
 	for (i = 0; i < cal->data->num_csi2_phy; ++i) {
@@ -891,7 +852,7 @@ static int cal_async_notifier_register(struct cal_dev *cal)
 		casd->phy = phy;
 	}
 
-	ret = v4l2_async_nf_register(&cal->notifier);
+	ret = v4l2_async_nf_register(&cal->v4l2_dev, &cal->notifier);
 	if (ret) {
 		cal_err(cal, "Error registering async notifier\n");
 		goto error;
@@ -1022,10 +983,8 @@ static struct cal_ctx *cal_ctx_create(struct cal_dev *cal, int inst)
 	ctx->cport = inst;
 
 	ret = cal_ctx_v4l2_init(ctx);
-	if (ret) {
-		kfree(ctx);
+	if (ret)
 		return NULL;
-	}
 
 	return ctx;
 }
@@ -1265,7 +1224,7 @@ error_pm_runtime:
 	return ret;
 }
 
-static void cal_remove(struct platform_device *pdev)
+static int cal_remove(struct platform_device *pdev)
 {
 	struct cal_dev *cal = platform_get_drvdata(pdev);
 	unsigned int i;
@@ -1291,6 +1250,8 @@ static void cal_remove(struct platform_device *pdev)
 	if (ret >= 0)
 		pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
+
+	return 0;
 }
 
 static int cal_runtime_resume(struct device *dev)

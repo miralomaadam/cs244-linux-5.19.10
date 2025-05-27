@@ -7,6 +7,7 @@
 #include <linux/etherdevice.h>
 #include <linux/slab.h>
 #include <linux/usb.h>
+#include <linux/gpio.h>
 #include <linux/jiffies.h>
 #include <net/ieee80211_radiotap.h>
 
@@ -102,6 +103,7 @@ int plfxlc_mac_init_hw(struct ieee80211_hw *hw)
 void plfxlc_mac_release(struct plfxlc_mac *mac)
 {
 	plfxlc_chip_release(&mac->chip);
+	lockdep_assert_held(&mac->lock);
 }
 
 int plfxlc_op_start(struct ieee80211_hw *hw)
@@ -110,7 +112,7 @@ int plfxlc_op_start(struct ieee80211_hw *hw)
 	return 0;
 }
 
-void plfxlc_op_stop(struct ieee80211_hw *hw, bool suspend)
+void plfxlc_op_stop(struct ieee80211_hw *hw)
 {
 	struct plfxlc_mac *mac = plfxlc_hw_mac(hw);
 
@@ -131,7 +133,7 @@ int plfxlc_restore_settings(struct plfxlc_mac *mac)
 		return 0;
 
 	if (mac->vif) {
-		beacon = ieee80211_beacon_get(mac->hw, mac->vif, 0);
+		beacon = ieee80211_beacon_get(mac->hw, mac->vif);
 		if (beacon) {
 			/*beacon is hardcoded in firmware */
 			kfree_skb(beacon);
@@ -585,12 +587,12 @@ static void plfxlc_op_configure_filter(struct ieee80211_hw *hw,
 static void plfxlc_op_bss_info_changed(struct ieee80211_hw *hw,
 				       struct ieee80211_vif *vif,
 				       struct ieee80211_bss_conf *bss_conf,
-				       u64 changes)
+				       u32 changes)
 {
 	struct plfxlc_mac *mac = plfxlc_hw_mac(hw);
 	int associated;
 
-	dev_dbg(plfxlc_mac_dev(mac), "changes: %llx\n", changes);
+	dev_dbg(plfxlc_mac_dev(mac), "changes: %x\n", changes);
 
 	if (mac->type != NL80211_IFTYPE_ADHOC) { /* for STATION */
 		associated = is_valid_ether_addr(bss_conf->bssid);
@@ -599,7 +601,7 @@ static void plfxlc_op_bss_info_changed(struct ieee80211_hw *hw,
 	/* for ADHOC */
 	associated = true;
 	if (changes & BSS_CHANGED_BEACON) {
-		struct sk_buff *beacon = ieee80211_beacon_get(hw, vif, 0);
+		struct sk_buff *beacon = ieee80211_beacon_get(hw, vif);
 
 		if (beacon) {
 			/*beacon is hardcoded in firmware */
@@ -664,7 +666,7 @@ static void plfxlc_get_et_strings(struct ieee80211_hw *hw,
 				  u32 sset, u8 *data)
 {
 	if (sset == ETH_SS_STATS)
-		memcpy(data, et_strings, sizeof(et_strings));
+		memcpy(data, *et_strings, sizeof(et_strings));
 }
 
 static void plfxlc_get_et_stats(struct ieee80211_hw *hw,
@@ -683,12 +685,7 @@ static int plfxlc_set_rts_threshold(struct ieee80211_hw *hw, u32 value)
 }
 
 static const struct ieee80211_ops plfxlc_ops = {
-	.add_chanctx = ieee80211_emulate_add_chanctx,
-	.remove_chanctx = ieee80211_emulate_remove_chanctx,
-	.change_chanctx = ieee80211_emulate_change_chanctx,
-	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
 	.tx = plfxlc_op_tx,
-	.wake_tx_queue = ieee80211_handle_wake_tx_queue,
 	.start = plfxlc_op_start,
 	.stop = plfxlc_op_stop,
 	.add_interface = plfxlc_op_add_interface,

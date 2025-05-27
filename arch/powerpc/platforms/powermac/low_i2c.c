@@ -347,7 +347,7 @@ static irqreturn_t kw_i2c_irq(int irq, void *dev_id)
 	unsigned long flags;
 
 	spin_lock_irqsave(&host->lock, flags);
-	timer_delete(&host->timeout_timer);
+	del_timer(&host->timeout_timer);
 	kw_i2c_handle_interrupt(host, kw_read_reg(reg_isr));
 	if (host->state != state_idle) {
 		host->timeout_timer.expires = jiffies + KW_POLL_TIMEOUT;
@@ -627,7 +627,6 @@ static void __init kw_i2c_probe(void)
 			if (parent == NULL)
 				continue;
 			chans = parent->name[0] == 'u' ? 2 : 1;
-			of_node_put(parent);
 			for (i = 0; i < chans; i++)
 				kw_i2c_add(host, np, np, i);
 		} else {
@@ -925,10 +924,8 @@ static void __init smu_i2c_probe(void)
 
 		sz = sizeof(struct pmac_i2c_bus) + sizeof(struct smu_i2c_cmd);
 		bus = kzalloc(sz, GFP_KERNEL);
-		if (bus == NULL) {
-			of_node_put(busnode);
+		if (bus == NULL)
 			return;
-		}
 
 		bus->controller = controller;
 		bus->busnode = of_node_get(busnode);

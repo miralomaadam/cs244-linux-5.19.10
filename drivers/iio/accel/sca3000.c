@@ -424,7 +424,7 @@ error_ret:
  * sca3000_print_rev() - sysfs interface to read the chip revision number
  * @indio_dev: Device instance specific generic IIO data.
  * Driver specific device instance data can be obtained via
- * iio_priv(indio_dev)
+ * via iio_priv(indio_dev)
  */
 static int sca3000_print_rev(struct iio_dev *indio_dev)
 {
@@ -1158,7 +1158,7 @@ error_ret:
 	return ret;
 }
 
-static int sca3000_freefall_set_state(struct iio_dev *indio_dev, bool state)
+static int sca3000_freefall_set_state(struct iio_dev *indio_dev, int state)
 {
 	struct sca3000_state *st = iio_priv(indio_dev);
 	int ret;
@@ -1181,7 +1181,7 @@ static int sca3000_freefall_set_state(struct iio_dev *indio_dev, bool state)
 }
 
 static int sca3000_motion_detect_set_state(struct iio_dev *indio_dev, int axis,
-					   bool state)
+					   int state)
 {
 	struct sca3000_state *st = iio_priv(indio_dev);
 	int ret, ctrlval;
@@ -1253,7 +1253,7 @@ static int sca3000_write_event_config(struct iio_dev *indio_dev,
 				      const struct iio_chan_spec *chan,
 				      enum iio_event_type type,
 				      enum iio_event_direction dir,
-				      bool state)
+				      int state)
 {
 	struct sca3000_state *st = iio_priv(indio_dev);
 	int ret;

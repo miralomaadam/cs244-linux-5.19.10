@@ -21,6 +21,7 @@
 /**
  * struct ftpm_tee_private - fTPM's private data
  * @chip:     struct tpm_chip instance registered with tpm framework.
+ * @state:    internal state
  * @session:  fTPM TA session identifier.
  * @resp_len: cached response buffer length.
  * @resp_buf: cached response buffer.

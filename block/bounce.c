@@ -10,7 +10,7 @@
 #include <linux/export.h>
 #include <linux/swap.h>
 #include <linux/gfp.h>
-#include <linux/bio-integrity.h>
+#include <linux/bio.h>
 #include <linux/pagemap.h>
 #include <linux/mempool.h>
 #include <linux/blkdev.h>
@@ -41,6 +41,8 @@ static void init_bounce_bioset(void)
 
 	ret = bioset_init(&bounce_bio_set, BIO_POOL_SIZE, 0, BIOSET_NEED_BVECS);
 	BUG_ON(ret);
+	if (bioset_integrity_create(&bounce_bio_set, BIO_POOL_SIZE))
+		BUG_ON(1);
 
 	ret = bioset_init(&bounce_bio_split, BIO_POOL_SIZE, 0, 0);
 	BUG_ON(ret);
@@ -167,7 +169,6 @@ static struct bio *bounce_clone_bio(struct bio *bio_src)
 	if (bio_flagged(bio_src, BIO_REMAPPED))
 		bio_set_flag(bio, BIO_REMAPPED);
 	bio->bi_ioprio		= bio_src->bi_ioprio;
-	bio->bi_write_hint	= bio_src->bi_write_hint;
 	bio->bi_iter.bi_sector	= bio_src->bi_iter.bi_sector;
 	bio->bi_iter.bi_size	= bio_src->bi_iter.bi_size;
 
@@ -198,39 +199,32 @@ err_put:
 	return NULL;
 }
 
-struct bio *__blk_queue_bounce(struct bio *bio_orig, struct request_queue *q)
+void __blk_queue_bounce(struct request_queue *q, struct bio **bio_orig)
 {
 	struct bio *bio;
-	int rw = bio_data_dir(bio_orig);
+	int rw = bio_data_dir(*bio_orig);
 	struct bio_vec *to, from;
 	struct bvec_iter iter;
-	unsigned i = 0, bytes = 0;
+	unsigned i = 0;
 	bool bounce = false;
-	int sectors;
+	int sectors = 0;
 
-	bio_for_each_segment(from, bio_orig, iter) {
+	bio_for_each_segment(from, *bio_orig, iter) {
 		if (i++ < BIO_MAX_VECS)
-			bytes += from.bv_len;
+			sectors += from.bv_len >> 9;
 		if (PageHighMem(from.bv_page))
 			bounce = true;
 	}
 	if (!bounce)
-		return bio_orig;
+		return;
 
-	/*
-	 * Individual bvecs might not be logical block aligned. Round down
-	 * the split size so that each bio is properly block size aligned,
-	 * even if we do not use the full hardware limits.
-	 */
-	sectors = ALIGN_DOWN(bytes, queue_logical_block_size(q)) >>
-			SECTOR_SHIFT;
-	if (sectors < bio_sectors(bio_orig)) {
-		bio = bio_split(bio_orig, sectors, GFP_NOIO, &bounce_bio_split);
-		bio_chain(bio, bio_orig);
-		submit_bio_noacct(bio_orig);
-		bio_orig = bio;
+	if (sectors < bio_sectors(*bio_orig)) {
+		bio = bio_split(*bio_orig, sectors, GFP_NOIO, &bounce_bio_split);
+		bio_chain(bio, *bio_orig);
+		submit_bio_noacct(*bio_orig);
+		*bio_orig = bio;
 	}
-	bio = bounce_clone_bio(bio_orig);
+	bio = bounce_clone_bio(*bio_orig);
 
 	/*
 	 * Bvec table can't be updated by bio_for_each_segment_all(),
@@ -253,7 +247,7 @@ struct bio *__blk_queue_bounce(struct bio *bio_orig, struct request_queue *q)
 		to->bv_page = bounce_page;
 	}
 
-	trace_block_bio_bounce(bio_orig);
+	trace_block_bio_bounce(*bio_orig);
 
 	bio->bi_flags |= (1 << BIO_BOUNCED);
 
@@ -262,6 +256,6 @@ struct bio *__blk_queue_bounce(struct bio *bio_orig, struct request_queue *q)
 	else
 		bio->bi_end_io = bounce_end_io_write;
 
-	bio->bi_private = bio_orig;
-	return bio;
+	bio->bi_private = *bio_orig;
+	*bio_orig = bio;
 }

@@ -96,19 +96,22 @@ static int kdb_ftdump(int argc, const char **argv)
 {
 	int skip_entries = 0;
 	long cpu_file;
-	int err;
+	char *cp;
 	int cnt;
 	int cpu;
 
 	if (argc > 2)
 		return KDB_ARGCOUNT;
 
-	if (argc && kstrtoint(argv[1], 0, &skip_entries))
-		return KDB_BADINT;
+	if (argc) {
+		skip_entries = simple_strtol(argv[1], &cp, 0);
+		if (*cp)
+			skip_entries = 0;
+	}
 
 	if (argc == 2) {
-		err = kstrtol(argv[2], 0, &cpu_file);
-		if (err || cpu_file >= NR_CPUS || cpu_file < 0 ||
+		cpu_file = simple_strtol(argv[2], &cp, 0);
+		if (*cp || cpu_file >= NR_CPUS || cpu_file < 0 ||
 		    !cpu_online(cpu_file))
 			return KDB_BADINT;
 	} else {

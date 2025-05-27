@@ -12,7 +12,8 @@
     |       arm64: |  ok  |
     |        csky: | TODO |
     |     hexagon: | TODO |
-    |   loongarch: |  ok  |
+    |        ia64: | TODO |
+    |       loong: | TODO |
     |        m68k: | TODO |
     |  microblaze: | TODO |
     |        mips: |  ok  |
@@ -26,5 +27,5 @@
     |       sparc: | TODO |
     |          um: |  ok  |
     |         x86: |  ok  |
-    |      xtensa: |  ok  |
+    |      xtensa: | TODO |
     -----------------------

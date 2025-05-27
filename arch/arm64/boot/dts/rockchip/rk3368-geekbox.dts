@@ -12,7 +12,6 @@
 	compatible = "geekbuying,geekbox", "rockchip,rk3368";
 
 	aliases {
-		ethernet0 = &gmac;
 		mmc0 = &emmc;
 	};
 
@@ -44,7 +43,7 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&pwr_key>;
 
-		key-power {
+		power {
 			gpios = <&gpio0 RK_PA2 GPIO_ACTIVE_LOW>;
 			label = "GPIO Power";
 			linux,code = <KEY_POWER>;
@@ -68,7 +67,7 @@
 		};
 	};
 
-	vcc_sys: regulator-vcc-sys {
+	vcc_sys: vcc-sys-regulator {
 		compatible = "regulator-fixed";
 		regulator-name = "vcc_sys";
 		regulator-min-microvolt = <5000000>;
@@ -113,7 +112,7 @@
 		pinctrl-0 = <&pmic_int>, <&pmic_sleep>;
 		interrupt-parent = <&gpio0>;
 		interrupts = <RK_PA5 IRQ_TYPE_LEVEL_LOW>;
-		system-power-controller;
+		rockchip,system-power-controller;
 		vcc1-supply = <&vcc_sys>;
 		vcc2-supply = <&vcc_sys>;
 		vcc3-supply = <&vcc_sys>;

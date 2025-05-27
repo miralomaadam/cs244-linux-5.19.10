@@ -30,7 +30,6 @@ patternProperties:
 
   "^gpio@[0-7]$":
     type: object
-    additionalProperties: false
 
     description:
       Eight GPIO banks (gpio@0 to gpio@7), that each contain between 14 and 18
@@ -103,8 +102,7 @@ patternProperties:
         items:
           pattern: "^gpio1?[0-9]{1,2}$"
 
-      input-debounce:
-        maxItems: 1
+      input-debounce: true
 
     additionalProperties: false
 
@@ -154,7 +152,7 @@ examples:
       pinctrl-names = "default";
       pinctrl-0 = <&pinctrl_uid>, <&pinmux_uid>;
 
-      button-uid {
+      uid {
         label = "UID";
         linux,code = <102>;
         gpios = <&gpio0 14 GPIO_ACTIVE_HIGH>;

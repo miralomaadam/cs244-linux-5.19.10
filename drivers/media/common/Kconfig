@@ -14,9 +14,6 @@ config TTPCI_EEPROM
         tristate
         depends on I2C
 
-config UVC_COMMON
-	tristate
-
 config VIDEO_CX2341X
 	tristate
 

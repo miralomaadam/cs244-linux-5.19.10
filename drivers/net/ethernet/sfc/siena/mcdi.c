@@ -534,7 +534,7 @@ static bool efx_mcdi_complete_async(struct efx_mcdi_iface *mcdi, bool timeout)
 	 * of it aborting the next request.
 	 */
 	if (!timeout)
-		timer_delete_sync(&mcdi->async_timer);
+		del_timer_sync(&mcdi->async_timer);
 
 	spin_lock(&mcdi->async_lock);
 	async = list_first_entry(&mcdi->async_list,
@@ -1145,7 +1145,7 @@ void efx_siena_mcdi_flush_async(struct efx_nic *efx)
 	/* We must be in poll or fail mode so no more requests can be queued */
 	BUG_ON(mcdi->mode == MCDI_MODE_EVENTS);
 
-	timer_delete_sync(&mcdi->async_timer);
+	del_timer_sync(&mcdi->async_timer);
 
 	/* If a request is still running, make sure we give the MC
 	 * time to complete it so that the response won't overwrite our
@@ -1264,7 +1264,7 @@ static void efx_mcdi_ev_death(struct efx_nic *efx, int rc)
 }
 
 /* The MC is going down in to BIST mode. set the BIST flag to block
- * new MCDI, cancel any outstanding MCDI and schedule a BIST-type reset
+ * new MCDI, cancel any outstanding MCDI and and schedule a BIST-type reset
  * (which doesn't actually execute a reset, it waits for the controlling
  * function to reset it).
  */

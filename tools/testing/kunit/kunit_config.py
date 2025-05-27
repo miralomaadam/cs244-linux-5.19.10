@@ -8,7 +8,7 @@
 
 from dataclasses import dataclass
 import re
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import List, Set
 
 CONFIG_IS_NOT_SET_PATTERN = r'^# CONFIG_(\w+) is not set$'
 CONFIG_PATTERN = r'^CONFIG_(\w+)=(\S+|".*")$'
@@ -32,51 +32,35 @@ class Kconfig:
 	"""Represents defconfig or .config specified using the Kconfig language."""
 
 	def __init__(self) -> None:
-		self._entries = {}  # type: Dict[str, str]
+		self._entries = []  # type: List[KconfigEntry]
 
-	def __eq__(self, other: Any) -> bool:
-		if not isinstance(other, self.__class__):
-			return False
-		return self._entries == other._entries
+	def entries(self) -> Set[KconfigEntry]:
+		return set(self._entries)
 
-	def __repr__(self) -> str:
-		return ','.join(str(e) for e in self.as_entries())
-
-	def as_entries(self) -> Iterable[KconfigEntry]:
-		for name, value in self._entries.items():
-			yield KconfigEntry(name, value)
-
-	def add_entry(self, name: str, value: str) -> None:
-		self._entries[name] = value
+	def add_entry(self, entry: KconfigEntry) -> None:
+		self._entries.append(entry)
 
 	def is_subset_of(self, other: 'Kconfig') -> bool:
-		for name, value in self._entries.items():
-			b = other._entries.get(name)
+		other_dict = {e.name: e.value for e in other.entries()}
+		for a in self.entries():
+			b = other_dict.get(a.name)
 			if b is None:
-				if value == 'n':
+				if a.value == 'n':
 					continue
 				return False
-			if value != b:
+			if a.value != b:
 				return False
 		return True
 
-	def conflicting_options(self, other: 'Kconfig') -> List[Tuple[KconfigEntry, KconfigEntry]]:
-		diff = []  # type: List[Tuple[KconfigEntry, KconfigEntry]]
-		for name, value in self._entries.items():
-			b = other._entries.get(name)
-			if b and value != b:
-				pair = (KconfigEntry(name, value), KconfigEntry(name, b))
-				diff.append(pair)
-		return diff
-
 	def merge_in_entries(self, other: 'Kconfig') -> None:
-		for name, value in other._entries.items():
-			self._entries[name] = value
+		if other.is_subset_of(self):
+			return
+		self._entries = list(self.entries().union(other.entries()))
 
 	def write_to_file(self, path: str) -> None:
 		with open(path, 'a+') as f:
-			for e in self.as_entries():
-				f.write(str(e) + '\n')
+			for entry in self.entries():
+				f.write(str(entry) + '\n')
 
 def parse_file(path: str) -> Kconfig:
 	with open(path, 'r') as f:
@@ -94,12 +78,14 @@ def parse_from_string(blob: str) -> Kconfig:
 
 		match = config_matcher.match(line)
 		if match:
-			kconfig.add_entry(match.group(1), match.group(2))
+			entry = KconfigEntry(match.group(1), match.group(2))
+			kconfig.add_entry(entry)
 			continue
 
 		empty_match = is_not_set_matcher.match(line)
 		if empty_match:
-			kconfig.add_entry(empty_match.group(1), 'n')
+			entry = KconfigEntry(empty_match.group(1), 'n')
+			kconfig.add_entry(entry)
 			continue
 
 		if line[0] == '#':

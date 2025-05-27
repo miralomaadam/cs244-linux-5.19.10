@@ -44,6 +44,12 @@
 
 #include "qib.h"
 
+/*
+ * The size has to be longer than this string, so we can append
+ * board/chip information to it in the init code.
+ */
+const char ib_qib_version[] = QIB_DRIVER_VERSION "\n";
+
 DEFINE_MUTEX(qib_mutex);	/* general driver use */
 
 unsigned qib_ibmtu;
@@ -768,7 +774,7 @@ int qib_reset_device(int unit)
 		ppd = dd->pport + pidx;
 		if (atomic_read(&ppd->led_override_timer_active)) {
 			/* Need to stop LED timer, _then_ shut off LEDs */
-			timer_delete_sync(&ppd->led_override_timer);
+			del_timer_sync(&ppd->led_override_timer);
 			atomic_set(&ppd->led_override_timer_active, 0);
 		}
 

@@ -20,7 +20,6 @@
 #include <linux/delay.h>
 #include <linux/iversion.h>
 #include <linux/fileattr.h>
-#include <linux/uuid.h>
 #include "ext4_jbd2.h"
 #include "ext4.h"
 #include <linux/fsmap.h>
@@ -40,15 +39,6 @@ static void ext4_sb_setlabel(struct ext4_super_block *es, const void *arg)
 	BUILD_BUG_ON(sizeof(es->s_volume_name) < EXT4_LABEL_MAX);
 
 	memcpy(es->s_volume_name, (char *)arg, EXT4_LABEL_MAX);
-}
-
-/*
- * Superblock modification callback function for changing file system
- * UUID.
- */
-static void ext4_sb_setuuid(struct ext4_super_block *es, const void *arg)
-{
-	memcpy(es->s_uuid, (__u8 *)arg, UUID_SIZE);
 }
 
 static
@@ -142,18 +132,22 @@ static int ext4_update_backup_sb(struct super_block *sb,
 
 	es = (struct ext4_super_block *) (bh->b_data + offset);
 	lock_buffer(bh);
-	if (ext4_has_feature_metadata_csum(sb) &&
+	if (ext4_has_metadata_csum(sb) &&
 	    es->s_checksum != ext4_superblock_csum(sb, es)) {
 		ext4_msg(sb, KERN_ERR, "Invalid checksum for backup "
-		"superblock %llu", sb_block);
+		"superblock %llu\n", sb_block);
 		unlock_buffer(bh);
+		err = -EFSBADCRC;
 		goto out_bh;
 	}
 	func(es, arg);
-	if (ext4_has_feature_metadata_csum(sb))
+	if (ext4_has_metadata_csum(sb))
 		es->s_checksum = ext4_superblock_csum(sb, es);
 	set_buffer_uptodate(bh);
 	unlock_buffer(bh);
+
+	if (err)
+		goto out_bh;
 
 	if (handle) {
 		err = ext4_handle_dirty_metadata(handle, NULL, bh);
@@ -312,22 +306,13 @@ static void swap_inode_data(struct inode *inode1, struct inode *inode2)
 	struct ext4_inode_info *ei1;
 	struct ext4_inode_info *ei2;
 	unsigned long tmp;
-	struct timespec64 ts1, ts2;
 
 	ei1 = EXT4_I(inode1);
 	ei2 = EXT4_I(inode2);
 
 	swap(inode1->i_version, inode2->i_version);
-
-	ts1 = inode_get_atime(inode1);
-	ts2 = inode_get_atime(inode2);
-	inode_set_atime_to_ts(inode1, ts2);
-	inode_set_atime_to_ts(inode2, ts1);
-
-	ts1 = inode_get_mtime(inode1);
-	ts2 = inode_get_mtime(inode2);
-	inode_set_mtime_to_ts(inode1, ts2);
-	inode_set_mtime_to_ts(inode2, ts1);
+	swap(inode1->i_atime, inode2->i_atime);
+	swap(inode1->i_mtime, inode2->i_mtime);
 
 	memswap(ei1->i_data, ei2->i_data, sizeof(ei1->i_data));
 	tmp = ei1->i_flags & EXT4_FL_SHOULD_SWAP;
@@ -351,7 +336,7 @@ void ext4_reset_inode_seed(struct inode *inode)
 	__le32 gen = cpu_to_le32(inode->i_generation);
 	__u32 csum;
 
-	if (!ext4_has_feature_metadata_csum(inode->i_sb))
+	if (!ext4_has_metadata_csum(inode->i_sb))
 		return;
 
 	csum = ext4_chksum(sbi, sbi->s_csum_seed, (__u8 *)&inum, sizeof(inum));
@@ -364,12 +349,12 @@ void ext4_reset_inode_seed(struct inode *inode)
  * important fields of the inodes.
  *
  * @sb:         the super block of the filesystem
- * @idmap:	idmap of the mount the inode was found from
+ * @mnt_userns:	user namespace of the mount the inode was found from
  * @inode:      the inode to swap with EXT4_BOOT_LOADER_INO
  *
  */
 static long swap_inode_boot_loader(struct super_block *sb,
-				struct mnt_idmap *idmap,
+				struct user_namespace *mnt_userns,
 				struct inode *inode)
 {
 	handle_t *handle;
@@ -380,8 +365,7 @@ static long swap_inode_boot_loader(struct super_block *sb,
 	blkcnt_t blocks;
 	unsigned short bytes;
 
-	inode_bl = ext4_iget(sb, EXT4_BOOT_LOADER_INO,
-			EXT4_IGET_SPECIAL | EXT4_IGET_BAD);
+	inode_bl = ext4_iget(sb, EXT4_BOOT_LOADER_INO, EXT4_IGET_SPECIAL);
 	if (IS_ERR(inode_bl))
 		return PTR_ERR(inode_bl);
 	ei_bl = EXT4_I(inode_bl);
@@ -399,7 +383,7 @@ static long swap_inode_boot_loader(struct super_block *sb,
 	}
 
 	if (IS_RDONLY(inode) || IS_APPEND(inode) || IS_IMMUTABLE(inode) ||
-	    !inode_owner_or_capable(idmap, inode) ||
+	    !inode_owner_or_capable(mnt_userns, inode) ||
 	    !capable(CAP_SYS_ADMIN)) {
 		err = -EPERM;
 		goto journal_err_out;
@@ -431,7 +415,7 @@ static long swap_inode_boot_loader(struct super_block *sb,
 	/* Protect extent tree against block allocations via delalloc */
 	ext4_double_down_write_data_sem(inode, inode_bl);
 
-	if (is_bad_inode(inode_bl) || !S_ISREG(inode_bl->i_mode)) {
+	if (inode_bl->i_nlink == 0) {
 		/* this inode has never been used as a BOOT_LOADER */
 		set_nlink(inode_bl, 1);
 		i_uid_write(inode_bl, 0);
@@ -440,7 +424,6 @@ static long swap_inode_boot_loader(struct super_block *sb,
 		ei_bl->i_flags = 0;
 		inode_set_iversion(inode_bl, 1);
 		i_size_write(inode_bl, 0);
-		EXT4_I(inode_bl)->i_disksize = inode_bl->i_size;
 		inode_bl->i_mode = S_IFREG;
 		if (ext4_has_feature_extents(sb)) {
 			ext4_set_inode_flag(inode_bl, EXT4_INODE_EXTENTS);
@@ -458,16 +441,14 @@ static long swap_inode_boot_loader(struct super_block *sb,
 	diff = size - size_bl;
 	swap_inode_data(inode, inode_bl);
 
-	inode_set_ctime_current(inode);
-	inode_set_ctime_current(inode_bl);
-	inode_inc_iversion(inode);
+	inode->i_ctime = inode_bl->i_ctime = current_time(inode);
 
-	inode->i_generation = get_random_u32();
-	inode_bl->i_generation = get_random_u32();
+	inode->i_generation = prandom_u32();
+	inode_bl->i_generation = prandom_u32();
 	ext4_reset_inode_seed(inode);
 	ext4_reset_inode_seed(inode_bl);
 
-	ext4_discard_preallocations(inode);
+	ext4_discard_preallocations(inode, 0);
 
 	err = ext4_mark_inode_dirty(handle, inode);
 	if (err < 0) {
@@ -673,8 +654,7 @@ static int ext4_ioctl_setflags(struct inode *inode,
 
 	ext4_set_inode_flags(inode, false);
 
-	inode_set_ctime_current(inode);
-	inode_inc_iversion(inode);
+	inode->i_ctime = current_time(inode);
 
 	err = ext4_mark_iloc_dirty(handle, inode, &iloc);
 flags_err:
@@ -740,10 +720,6 @@ static int ext4_ioctl_setproject(struct inode *inode, __u32 projid)
 	if (ext4_is_quota_file(inode))
 		return err;
 
-	err = dquot_initialize(inode);
-	if (err)
-		return err;
-
 	err = ext4_get_inode_loc(inode, &iloc);
 	if (err)
 		return err;
@@ -758,6 +734,10 @@ static int ext4_ioctl_setproject(struct inode *inode, __u32 projid)
 	} else {
 		brelse(iloc.bh);
 	}
+
+	err = dquot_initialize(inode);
+	if (err)
+		return err;
 
 	handle = ext4_journal_start(inode, EXT4_HT_QUOTA,
 		EXT4_QUOTA_INIT_BLOCKS(sb) +
@@ -784,8 +764,7 @@ static int ext4_ioctl_setproject(struct inode *inode, __u32 projid)
 	}
 
 	EXT4_I(inode)->i_projid = kprojid;
-	inode_set_ctime_current(inode);
-	inode_inc_iversion(inode);
+	inode->i_ctime = current_time(inode);
 out_dirty:
 	rc = ext4_mark_iloc_dirty(handle, inode, &iloc);
 	if (!err)
@@ -803,15 +782,21 @@ static int ext4_ioctl_setproject(struct inode *inode, __u32 projid)
 }
 #endif
 
-int ext4_force_shutdown(struct super_block *sb, u32 flags)
+static int ext4_shutdown(struct super_block *sb, unsigned long arg)
 {
 	struct ext4_sb_info *sbi = EXT4_SB(sb);
-	int ret;
+	__u32 flags;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if (get_user(flags, (__u32 __user *)arg))
+		return -EFAULT;
 
 	if (flags > EXT4_GOING_FLAGS_NOLOGFLUSH)
 		return -EINVAL;
 
-	if (ext4_forced_shutdown(sb))
+	if (ext4_forced_shutdown(sbi))
 		return 0;
 
 	ext4_msg(sb, KERN_ALERT, "shut down requested (%d)", flags);
@@ -819,11 +804,9 @@ int ext4_force_shutdown(struct super_block *sb, u32 flags)
 
 	switch (flags) {
 	case EXT4_GOING_FLAGS_DEFAULT:
-		ret = bdev_freeze(sb->s_bdev);
-		if (ret)
-			return ret;
+		freeze_bdev(sb->s_bdev);
 		set_bit(EXT4_FLAGS_SHUTDOWN, &sbi->s_ext4_flags);
-		bdev_thaw(sb->s_bdev);
+		thaw_bdev(sb->s_bdev);
 		break;
 	case EXT4_GOING_FLAGS_LOGFLUSH:
 		set_bit(EXT4_FLAGS_SHUTDOWN, &sbi->s_ext4_flags);
@@ -842,19 +825,6 @@ int ext4_force_shutdown(struct super_block *sb, u32 flags)
 	}
 	clear_opt(sb, DISCARD);
 	return 0;
-}
-
-static int ext4_ioctl_shutdown(struct super_block *sb, unsigned long arg)
-{
-	u32 flags;
-
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
-	if (get_user(flags, (__u32 __user *)arg))
-		return -EFAULT;
-
-	return ext4_force_shutdown(sb, flags);
 }
 
 struct getfsmap_info {
@@ -974,9 +944,7 @@ static long ext4_ioctl_group_add(struct file *file,
 	    test_opt(sb, INIT_INODE_TABLE))
 		err = ext4_register_li_request(sb, input->group);
 group_add_out:
-	err2 = ext4_resize_end(sb, false);
-	if (err == 0)
-		err = err2;
+	ext4_resize_end(sb);
 	return err;
 }
 
@@ -996,7 +964,7 @@ int ext4_fileattr_get(struct dentry *dentry, struct fileattr *fa)
 	return 0;
 }
 
-int ext4_fileattr_set(struct mnt_idmap *idmap,
+int ext4_fileattr_set(struct user_namespace *mnt_userns,
 		      struct dentry *dentry, struct fileattr *fa)
 {
 	struct inode *inode = d_inode(dentry);
@@ -1080,6 +1048,9 @@ static int ext4_ioctl_checkpoint(struct file *filp, unsigned long arg)
 	if (!EXT4_SB(sb)->s_journal)
 		return -ENODEV;
 
+	if (flags & ~EXT4_IOC_CHECKPOINT_FLAG_VALID)
+		return -EINVAL;
+
 	if ((flags & JBD2_JOURNAL_FLUSH_DISCARD) &&
 	    !bdev_max_discard_sectors(EXT4_SB(sb)->s_journal->j_dev))
 		return -EOPNOTSUPP;
@@ -1150,8 +1121,9 @@ static int ext4_ioctl_getlabel(struct ext4_sb_info *sbi, char __user *user_label
 	 */
 	BUILD_BUG_ON(EXT4_LABEL_MAX >= FSLABEL_MAX);
 
+	memset(label, 0, sizeof(label));
 	lock_buffer(sbi->s_sbh);
-	memtostr_pad(label, sbi->s_es->s_volume_name);
+	strncpy(label, sbi->s_es->s_volume_name, EXT4_LABEL_MAX);
 	unlock_buffer(sbi->s_sbh);
 
 	if (copy_to_user(user_label, label, sizeof(label)))
@@ -1159,82 +1131,11 @@ static int ext4_ioctl_getlabel(struct ext4_sb_info *sbi, char __user *user_label
 	return 0;
 }
 
-static int ext4_ioctl_getuuid(struct ext4_sb_info *sbi,
-			struct fsuuid __user *ufsuuid)
-{
-	struct fsuuid fsuuid;
-	__u8 uuid[UUID_SIZE];
-
-	if (copy_from_user(&fsuuid, ufsuuid, sizeof(fsuuid)))
-		return -EFAULT;
-
-	if (fsuuid.fsu_len == 0) {
-		fsuuid.fsu_len = UUID_SIZE;
-		if (copy_to_user(&ufsuuid->fsu_len, &fsuuid.fsu_len,
-					sizeof(fsuuid.fsu_len)))
-			return -EFAULT;
-		return 0;
-	}
-
-	if (fsuuid.fsu_len < UUID_SIZE || fsuuid.fsu_flags != 0)
-		return -EINVAL;
-
-	lock_buffer(sbi->s_sbh);
-	memcpy(uuid, sbi->s_es->s_uuid, UUID_SIZE);
-	unlock_buffer(sbi->s_sbh);
-
-	fsuuid.fsu_len = UUID_SIZE;
-	if (copy_to_user(ufsuuid, &fsuuid, sizeof(fsuuid)) ||
-	    copy_to_user(&ufsuuid->fsu_uuid[0], uuid, UUID_SIZE))
-		return -EFAULT;
-	return 0;
-}
-
-static int ext4_ioctl_setuuid(struct file *filp,
-			const struct fsuuid __user *ufsuuid)
-{
-	int ret = 0;
-	struct super_block *sb = file_inode(filp)->i_sb;
-	struct fsuuid fsuuid;
-	__u8 uuid[UUID_SIZE];
-
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
-	/*
-	 * If any checksums (group descriptors or metadata) are being used
-	 * then the checksum seed feature is required to change the UUID.
-	 */
-	if (((ext4_has_feature_gdt_csum(sb) ||
-	      ext4_has_feature_metadata_csum(sb))
-			&& !ext4_has_feature_csum_seed(sb))
-		|| ext4_has_feature_stable_inodes(sb))
-		return -EOPNOTSUPP;
-
-	if (copy_from_user(&fsuuid, ufsuuid, sizeof(fsuuid)))
-		return -EFAULT;
-
-	if (fsuuid.fsu_len != UUID_SIZE || fsuuid.fsu_flags != 0)
-		return -EINVAL;
-
-	if (copy_from_user(uuid, &ufsuuid->fsu_uuid[0], UUID_SIZE))
-		return -EFAULT;
-
-	ret = mnt_want_write_file(filp);
-	if (ret)
-		return ret;
-
-	ret = ext4_update_superblocks_fn(sb, ext4_sb_setuuid, &uuid);
-	mnt_drop_write_file(filp);
-
-	return ret;
-}
-
 static long __ext4_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	struct inode *inode = file_inode(filp);
 	struct super_block *sb = inode->i_sb;
-	struct mnt_idmap *idmap = file_mnt_idmap(filp);
+	struct user_namespace *mnt_userns = file_mnt_user_ns(filp);
 
 	ext4_debug("cmd = %u, arg = %lu\n", cmd, arg);
 
@@ -1251,10 +1152,10 @@ static long __ext4_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		__u32 generation;
 		int err;
 
-		if (!inode_owner_or_capable(idmap, inode))
+		if (!inode_owner_or_capable(mnt_userns, inode))
 			return -EPERM;
 
-		if (ext4_has_feature_metadata_csum(inode->i_sb)) {
+		if (ext4_has_metadata_csum(inode->i_sb)) {
 			ext4_warning(sb, "Setting inode version is not "
 				     "supported with metadata_csum enabled.");
 			return -ENOTTY;
@@ -1276,8 +1177,7 @@ static long __ext4_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		}
 		err = ext4_reserve_inode_write(handle, inode, &iloc);
 		if (err == 0) {
-			inode_set_ctime_current(inode);
-			inode_inc_iversion(inode);
+			inode->i_ctime = current_time(inode);
 			inode->i_generation = generation;
 			err = ext4_mark_iloc_dirty(handle, inode, &iloc);
 		}
@@ -1323,14 +1223,13 @@ setversion_out:
 			err = err2;
 		mnt_drop_write_file(filp);
 group_extend_out:
-		err2 = ext4_resize_end(sb, false);
-		if (err == 0)
-			err = err2;
+		ext4_resize_end(sb);
 		return err;
 	}
 
 	case EXT4_IOC_MOVE_EXT: {
 		struct move_extent me;
+		struct fd donor;
 		int err;
 
 		if (!(filp->f_mode & FMODE_READ) ||
@@ -1342,34 +1241,40 @@ group_extend_out:
 			return -EFAULT;
 		me.moved_len = 0;
 
-		CLASS(fd, donor)(me.donor_fd);
-		if (fd_empty(donor))
+		donor = fdget(me.donor_fd);
+		if (!donor.file)
 			return -EBADF;
 
-		if (!(fd_file(donor)->f_mode & FMODE_WRITE))
-			return -EBADF;
+		if (!(donor.file->f_mode & FMODE_WRITE)) {
+			err = -EBADF;
+			goto mext_out;
+		}
 
 		if (ext4_has_feature_bigalloc(sb)) {
 			ext4_msg(sb, KERN_ERR,
 				 "Online defrag not supported with bigalloc");
-			return -EOPNOTSUPP;
+			err = -EOPNOTSUPP;
+			goto mext_out;
 		} else if (IS_DAX(inode)) {
 			ext4_msg(sb, KERN_ERR,
 				 "Online defrag not supported with DAX");
-			return -EOPNOTSUPP;
+			err = -EOPNOTSUPP;
+			goto mext_out;
 		}
 
 		err = mnt_want_write_file(filp);
 		if (err)
-			return err;
+			goto mext_out;
 
-		err = ext4_move_extents(filp, fd_file(donor), me.orig_start,
+		err = ext4_move_extents(filp, donor.file, me.orig_start,
 					me.donor_start, me.len, &me.moved_len);
 		mnt_drop_write_file(filp);
 
 		if (copy_to_user((struct move_extent __user *)arg,
 				 &me, sizeof(me)))
 			err = -EFAULT;
+mext_out:
+		fdput(donor);
 		return err;
 	}
 
@@ -1386,7 +1291,7 @@ group_extend_out:
 	case EXT4_IOC_MIGRATE:
 	{
 		int err;
-		if (!inode_owner_or_capable(idmap, inode))
+		if (!inode_owner_or_capable(mnt_userns, inode))
 			return -EACCES;
 
 		err = mnt_want_write_file(filp);
@@ -1408,7 +1313,7 @@ group_extend_out:
 	case EXT4_IOC_ALLOC_DA_BLKS:
 	{
 		int err;
-		if (!inode_owner_or_capable(idmap, inode))
+		if (!inode_owner_or_capable(mnt_userns, inode))
 			return -EACCES;
 
 		err = mnt_want_write_file(filp);
@@ -1427,7 +1332,7 @@ group_extend_out:
 		err = mnt_want_write_file(filp);
 		if (err)
 			return err;
-		err = swap_inode_boot_loader(sb, idmap, inode);
+		err = swap_inode_boot_loader(sb, mnt_userns, inode);
 		mnt_drop_write_file(filp);
 		return err;
 	}
@@ -1466,9 +1371,7 @@ group_extend_out:
 			err = ext4_register_li_request(sb, o_group);
 
 resizefs_out:
-		err2 = ext4_resize_end(sb, true);
-		if (err == 0)
-			err = err2;
+		ext4_resize_end(sb);
 		return err;
 	}
 
@@ -1552,7 +1455,7 @@ resizefs_out:
 
 	case EXT4_IOC_CLEAR_ES_CACHE:
 	{
-		if (!inode_owner_or_capable(idmap, inode))
+		if (!inode_owner_or_capable(mnt_userns, inode))
 			return -EACCES;
 		ext4_clear_inode_es(inode);
 		return 0;
@@ -1578,7 +1481,7 @@ resizefs_out:
 		return ext4_ioctl_get_es_cache(filp, arg);
 
 	case EXT4_IOC_SHUTDOWN:
-		return ext4_ioctl_shutdown(sb, arg);
+		return ext4_shutdown(sb, arg);
 
 	case FS_IOC_ENABLE_VERITY:
 		if (!ext4_has_feature_verity(sb))
@@ -1606,10 +1509,6 @@ resizefs_out:
 		return ext4_ioctl_setlabel(filp,
 					   (const void __user *)arg);
 
-	case EXT4_IOC_GETFSUUID:
-		return ext4_ioctl_getuuid(EXT4_SB(sb), (void __user *)arg);
-	case EXT4_IOC_SETFSUUID:
-		return ext4_ioctl_setuuid(filp, (const void __user *)arg);
 	default:
 		return -ENOTTY;
 	}
@@ -1687,8 +1586,6 @@ long ext4_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case EXT4_IOC_CHECKPOINT:
 	case FS_IOC_GETFSLABEL:
 	case FS_IOC_SETFSLABEL:
-	case EXT4_IOC_GETFSUUID:
-	case EXT4_IOC_SETFSUUID:
 		break;
 	default:
 		return -ENOIOCTLCMD;
@@ -1702,15 +1599,13 @@ static void set_overhead(struct ext4_super_block *es, const void *arg)
 	es->s_overhead_clusters = cpu_to_le32(*((unsigned long *) arg));
 }
 
-int ext4_update_overhead(struct super_block *sb, bool force)
+int ext4_update_overhead(struct super_block *sb)
 {
 	struct ext4_sb_info *sbi = EXT4_SB(sb);
 
-	if (ext4_emergency_state(sb) || sb_rdonly(sb))
+	if (sb_rdonly(sb) || sbi->s_overhead == 0 ||
+	    sbi->s_overhead == le32_to_cpu(sbi->s_es->s_overhead_clusters))
 		return 0;
-	if (!force &&
-	    (sbi->s_overhead == 0 ||
-	     sbi->s_overhead == le32_to_cpu(sbi->s_es->s_overhead_clusters)))
-		return 0;
+
 	return ext4_update_superblocks_fn(sb, set_overhead, &sbi->s_overhead);
 }

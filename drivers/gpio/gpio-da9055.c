@@ -59,12 +59,14 @@ static int da9055_gpio_get(struct gpio_chip *gc, unsigned offset)
 
 }
 
-static int da9055_gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
+static void da9055_gpio_set(struct gpio_chip *gc, unsigned offset, int value)
 {
 	struct da9055_gpio *gpio = gpiochip_get_data(gc);
 
-	return da9055_reg_update(gpio->da9055, DA9055_REG_GPIO_MODE0_2,
-				 1 << offset, value << offset);
+	da9055_reg_update(gpio->da9055,
+			DA9055_REG_GPIO_MODE0_2,
+			1 << offset,
+			value << offset);
 }
 
 static int da9055_gpio_direction_input(struct gpio_chip *gc, unsigned offset)
@@ -100,7 +102,9 @@ static int da9055_gpio_direction_output(struct gpio_chip *gc,
 	if (ret < 0)
 		return ret;
 
-	return da9055_gpio_set(gc, offset, value);
+	da9055_gpio_set(gc, offset, value);
+
+	return 0;
 }
 
 static int da9055_gpio_to_irq(struct gpio_chip *gc, u32 offset)
@@ -116,7 +120,7 @@ static const struct gpio_chip reference_gp = {
 	.label = "da9055-gpio",
 	.owner = THIS_MODULE,
 	.get = da9055_gpio_get,
-	.set_rv = da9055_gpio_set,
+	.set = da9055_gpio_set,
 	.direction_input = da9055_gpio_direction_input,
 	.direction_output = da9055_gpio_direction_output,
 	.to_irq = da9055_gpio_to_irq,

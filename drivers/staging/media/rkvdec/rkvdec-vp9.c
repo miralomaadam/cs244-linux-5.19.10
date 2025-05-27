@@ -84,8 +84,6 @@ struct rkvdec_vp9_probs {
 		struct rkvdec_vp9_inter_frame_probs inter;
 		struct rkvdec_vp9_intra_only_frame_probs intra_only;
 	};
-	/* 128 bit alignment */
-	u8 padding1[11];
 };
 
 /* Data structure describing auxiliary buffer format. */
@@ -227,6 +225,7 @@ static void init_intra_only_probs(struct rkvdec_ctx *ctx,
 				}
 			}
 		}
+
 	}
 
 	for (i = 0; i < sizeof(v4l2_vp9_kf_uv_mode_prob); ++i) {
@@ -384,17 +383,17 @@ get_ref_buf(struct rkvdec_ctx *ctx, struct vb2_v4l2_buffer *dst, u64 timestamp)
 {
 	struct v4l2_m2m_ctx *m2m_ctx = ctx->fh.m2m_ctx;
 	struct vb2_queue *cap_q = &m2m_ctx->cap_q_ctx.q;
-	struct vb2_buffer *buf;
+	int buf_idx;
 
 	/*
 	 * If a ref is unused or invalid, address of current destination
 	 * buffer is returned.
 	 */
-	buf = vb2_find_buffer(cap_q, timestamp);
-	if (!buf)
-		buf = &dst->vb2_buf;
+	buf_idx = vb2_find_timestamp(cap_q, timestamp, 0);
+	if (buf_idx < 0)
+		return vb2_to_rkvdec_decoded_buf(&dst->vb2_buf);
 
-	return vb2_to_rkvdec_decoded_buf(buf);
+	return vb2_to_rkvdec_decoded_buf(vb2_get_buffer(cap_q, buf_idx));
 }
 
 static dma_addr_t get_mv_base_addr(struct rkvdec_decoded_buffer *buf)
@@ -1007,7 +1006,6 @@ static int rkvdec_vp9_start(struct rkvdec_ctx *ctx)
 
 	ctx->priv = vp9_ctx;
 
-	BUILD_BUG_ON(sizeof(priv_tbl->probs) % 16); /* ensure probs size is 128-bit aligned */
 	priv_tbl = dma_alloc_coherent(rkvdec->dev, sizeof(*priv_tbl),
 				      &vp9_ctx->priv_tbl.dma, GFP_KERNEL);
 	if (!priv_tbl) {
@@ -1017,6 +1015,7 @@ static int rkvdec_vp9_start(struct rkvdec_ctx *ctx)
 
 	vp9_ctx->priv_tbl.size = sizeof(*priv_tbl);
 	vp9_ctx->priv_tbl.cpu = priv_tbl;
+	memset(priv_tbl, 0, sizeof(*priv_tbl));
 
 	count_tbl = dma_alloc_coherent(rkvdec->dev, RKVDEC_VP9_COUNT_SIZE,
 				       &vp9_ctx->count_tbl.dma, GFP_KERNEL);
@@ -1027,6 +1026,7 @@ static int rkvdec_vp9_start(struct rkvdec_ctx *ctx)
 
 	vp9_ctx->count_tbl.size = RKVDEC_VP9_COUNT_SIZE;
 	vp9_ctx->count_tbl.cpu = count_tbl;
+	memset(count_tbl, 0, sizeof(*count_tbl));
 	rkvdec_init_v4l2_vp9_count_tbl(ctx);
 
 	return 0;
